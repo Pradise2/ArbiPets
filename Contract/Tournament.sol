@@ -6,196 +6,201 @@ import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/security/Pausable.sol";
 import "./PetNFT.sol";
 import "./GameToken.sol";
+import "./PetBattle.sol";
 import "./Random.sol";
 
 /**
  * @title Tournament
- * @dev Advanced tournament management system for CryptoPets battles
+ * @dev Advanced tournament system with brackets, seasons, and championships
  * @notice Features:
- * - Multiple tournament formats (single elimination, double elimination, round robin, swiss)
- * - Element-based tournaments with restrictions
- * - Rarity-gated tournaments (legendary only, etc.)
- * - Seasonal tournaments with special rewards
- * - Bracket management and automated progression
- * - Prize pool distribution and sponsor integration
- * - Live tournament streaming support
+ * - Multiple tournament formats (single elimination, double elimination, round robin)
+ * - Tiered tournaments by pet level and rarity
+ * - Seasonal championships with special rewards
+ * - Automated bracket generation and management
+ * - Spectator betting system
+ * - Prize pool distribution
  */
 contract Tournament is Ownable, ReentrancyGuard, Pausable, IRandomnessConsumer {
     
-    enum TournamentType {
-        SINGLE_ELIMINATION,
-        DOUBLE_ELIMINATION,
-        ROUND_ROBIN,
-        SWISS_SYSTEM,
-        KING_OF_HILL,
-        LEAGUE
-    }
+    enum TournamentType { SINGLE_ELIMINATION, DOUBLE_ELIMINATION, ROUND_ROBIN, SWISS_SYSTEM }
+    enum TournamentStatus { REGISTRATION, ACTIVE, COMPLETED, CANCELLED }
+    enum TournamentTier { ROOKIE, AMATEUR, PROFESSIONAL, CHAMPION, LEGENDARY }
+    enum MatchStatus { SCHEDULED, IN_PROGRESS, COMPLETED, DISPUTED }
     
-    enum TournamentStatus {
-        REGISTRATION,    // Players can register
-        READY,          // Registration closed, waiting to start
-        ACTIVE,         // Tournament in progress
-        PAUSED,         // Temporarily paused
-        FINISHED,       // Tournament completed
-        CANCELLED       // Tournament cancelled
-    }
-    
-    enum MatchStatus {
-        PENDING,        // Match scheduled but not started
-        IN_PROGRESS,    // Battle in progress
-        COMPLETED,      // Match finished
-        WALKOVER,       // Opponent didn't show
-        CANCELLED       // Match cancelled
-    }
-    
-    struct TournamentConfig {
+    struct Tournament {
         uint256 id;
         string name;
         string description;
         TournamentType tournamentType;
         TournamentStatus status;
-        address organizer;
-        uint256 entryFee;           // In PETS tokens
-        uint256 maxParticipants;
-        uint256 currentParticipants;
-        uint8 requiredElement;      // 255 = no requirement
-        uint8 minRarity;            // Minimum pet rarity
-        uint8 maxRarity;            // Maximum pet rarity
-        uint16 minLevel;            // Minimum pet level
-        uint16 maxLevel;            // Maximum pet level
+        TournamentTier tier;
+        uint256 entryFee;           // Entry fee in PETS tokens
+        uint256 prizePool;          // Total prize pool
+        uint256 maxParticipants;    // Maximum number of participants
+        uint256 currentParticipants; // Current registered participants
         uint32 registrationStart;
         uint32 registrationEnd;
         uint32 tournamentStart;
         uint32 tournamentEnd;
-        uint256 prizePool;
-        bool isSponsored;
-        address sponsor;
-        uint256[] prizeDistribution; // Percentage for each position
+        uint8 minLevel;             // Minimum pet level required
+        uint8 maxLevel;             // Maximum pet level allowed
+        uint8 requiredRarity;       // Minimum rarity (255 = no requirement)
+        uint8 requiredElement;      // Required element (255 = no requirement)
+        address organizer;
+        bool isSeasonalChampionship;
+        uint256[] participantPets;
+        mapping(address => bool) hasRegistered;
+        mapping(uint256 => uint256) petToOwner; // petId => owner index
     }
     
     struct TournamentMatch {
         uint256 matchId;
         uint256 tournamentId;
-        uint8 round;
-        uint8 matchNumber;
-        address player1;
-        address player2;
+        uint8 round;                // Round number
+        uint8 bracket;              // Main bracket = 0, losers bracket = 1
         uint256 pet1;
         uint256 pet2;
+        address player1;
+        address player2;
+        uint256 winner;             // Winning pet ID
+        address winnerAddress;
         MatchStatus status;
-        address winner;
-        uint256 winnerPet;
         uint32 scheduledTime;
-        uint32 completedTime;
+        uint256 battleId;           // Reference to PetBattle contract
         uint256 randomnessRequestId;
-        MatchResult result;
     }
     
-    struct MatchResult {
-        uint16 pet1Damage;
-        uint16 pet2Damage;
-        uint8 totalRounds;
-        bool pet1Critical;
-        bool pet2Critical;
-        uint16 pet1FinalHP;
-        uint16 pet2FinalHP;
-    }
-    
-    struct PlayerRegistration {
-        address player;
-        uint256 petId;
-        uint32 registrationTime;
-        bool checkedIn;
-        uint32 checkInTime;
-        uint8 currentRound;
-        bool eliminated;
-        uint8 wins;
-        uint8 losses;
-        uint256 totalScore;         // For Swiss/Round Robin
-    }
-    
-    struct TournamentBracket {
+    struct Bracket {
         uint256 tournamentId;
-        uint8 totalRounds;
         uint8 currentRound;
+        uint8 totalRounds;
+        uint256[] currentMatches;
         mapping(uint8 => uint256[]) roundMatches; // round => matchIds
-        mapping(address => uint8) playerPositions;
-        address[] finalStandings;
+        mapping(address => bool) isEliminated;
+        mapping(address => uint8) playerRanking;
     }
     
-    struct SeasonalTournament {
+    struct PrizeStructure {
+        uint256 firstPlace;         // Winner prize (basis points)
+        uint256 secondPlace;        // Runner-up prize
+        uint256 thirdPlace;         // Third place prize
+        uint256 participationBonus; // Participation reward
+        uint256 organizerFee;       // Fee to organizer
+        uint256 platformFee;        // Fee to platform
+    }
+    
+    struct SeasonData {
         uint256 seasonId;
-        string theme;               // "Fire Season", "Winter Championship", etc.
-        uint8 elementBonus;         // Boosted element for the season
-        uint256 bonusMultiplier;    // Prize multiplier
-        uint32 seasonStart;
-        uint32 seasonEnd;
-        uint256[] tournamentIds;
+        uint32 startTime;
+        uint32 endTime;
+        uint256 championshipTournamentId;
+        mapping(address => uint256) playerPoints;
+        mapping(address => uint8) tournamentWins;
+        address[] qualifiedPlayers;
         bool isActive;
+    }
+    
+    struct BettingPool {
+        uint256 tournamentId;
+        mapping(address => uint256) bets; // player => total bet amount
+        mapping(address => mapping(address => uint256)) playerBets; // bettor => player => amount
+        uint256 totalPool;
+        bool bettingOpen;
+        bool resolved;
     }
     
     // Contract references
     PetNFT public petContract;
     GameToken public gameToken;
+    PetBattle public battleContract;
     Random public randomContract;
     
     // Storage
-    mapping(uint256 => TournamentConfig) public tournaments;
-    mapping(uint256 => TournamentBracket) public brackets;
+    mapping(uint256 => Tournament) public tournaments;
     mapping(uint256 => TournamentMatch) public matches;
-    mapping(uint256 => mapping(address => PlayerRegistration)) public registrations;
-    mapping(uint256 => SeasonalTournament) public seasons;
+    mapping(uint256 => Bracket) public brackets;
+    mapping(uint256 => BettingPool) public bettingPools;
+    mapping(uint256 => SeasonData) public seasons;
     mapping(uint256 => uint256) public randomRequestToMatch;
     
-    // Tournament management
+    // Tournament tracking
+    mapping(address => uint256[]) public playerTournaments;
+    mapping(address => uint256) public playerSeasonPoints;
+    mapping(TournamentTier => uint256[]) public tierTournaments;
+    
+    // Counters
     uint256 public nextTournamentId = 1;
     uint256 public nextMatchId = 1;
     uint256 public nextSeasonId = 1;
-    uint256[] public activeTournaments;
-    uint256[] public upcomingTournaments;
+    uint256 public currentSeasonId = 0;
     
-    // Platform configuration
-    uint256 public platformFeePercentage = 10; // 10% of entry fees
-    address public treasuryAddress;
-    uint256 public minTournamentSize = 4;
-    uint256 public maxTournamentSize = 256;
-    uint32 public defaultMatchDuration = 1800; // 30 minutes
+    // Configuration
+    PrizeStructure public defaultPrizeStructure;
+    uint256 public platformFeePercentage = 500; // 5%
+    uint256 public minimumPrizePool = 1000 * 10**18; // 1000 PETS
+    uint32 public defaultRegistrationPeriod = 604800; // 7 days
+    uint32 public defaultTournamentDuration = 1209600; // 14 days
     
-    // Prize distribution templates
-    mapping(string => uint256[]) public prizeTemplates;
+    // Tier requirements
+    mapping(TournamentTier => uint256) public tierMinLevel;
+    mapping(TournamentTier => uint256) public tierMaxLevel;
+    mapping(TournamentTier => uint256) public tierEntryFee;
     
     // Events
-    event TournamentCreated(uint256 indexed tournamentId, string name, address organizer, TournamentType tournamentType);
-    event PlayerRegistered(uint256 indexed tournamentId, address indexed player, uint256 petId);
-    event TournamentStarted(uint256 indexed tournamentId, uint256 totalPrizePool);
-    event MatchCreated(uint256 indexed matchId, uint256 indexed tournamentId, address player1, address player2);
-    event MatchCompleted(uint256 indexed matchId, address winner, MatchResult result);
-    event TournamentFinished(uint256 indexed tournamentId, address winner, uint256 prizeAwarded);
-    event PrizeClaimed(uint256 indexed tournamentId, address indexed player, uint256 amount);
-    event SeasonStarted(uint256 indexed seasonId, string theme, uint8 elementBonus);
+    event TournamentCreated(uint256 indexed tournamentId, string name, TournamentType tournamentType, TournamentTier tier);
+    event PlayerRegistered(uint256 indexed tournamentId, address indexed player, uint256 indexed petId);
+    event TournamentStarted(uint256 indexed tournamentId, uint256 participantCount);
+    event MatchScheduled(uint256 indexed matchId, uint256 indexed tournamentId, uint256 pet1, uint256 pet2);
+    event MatchCompleted(uint256 indexed matchId, uint256 winner, address winnerAddress);
+    event TournamentCompleted(uint256 indexed tournamentId, address winner, uint256 prizeAmount);
+    event BetPlaced(uint256 indexed tournamentId, address indexed bettor, address indexed player, uint256 amount);
+    event SeasonStarted(uint256 indexed seasonId, uint32 duration);
     
     constructor(
         address _petContract,
         address _gameToken,
-        address _randomContract,
-        address _treasuryAddress
+        address _battleContract,
+        address _randomContract
     ) {
         petContract = PetNFT(_petContract);
         gameToken = GameToken(_gameToken);
+        battleContract = PetBattle(_battleContract);
         randomContract = Random(_randomContract);
-        treasuryAddress = _treasuryAddress;
         
-        _initializePrizeTemplates();
+        _initializeDefaultSettings();
     }
     
-    function _initializePrizeTemplates() internal {
-        // Standard single elimination prize distribution
-        prizeTemplates["single_elim_8"] = [5000, 3000, 2000]; // 50%, 30%, 20% for top 3
-        prizeTemplates["single_elim_16"] = [4000, 2500, 1500, 1000, 500, 500]; // Top 6
-        prizeTemplates["single_elim_32"] = [3000, 2000, 1500, 1000, 750, 750, 500, 500]; // Top 8
+    function _initializeDefaultSettings() internal {
+        // Set default prize structure
+        defaultPrizeStructure = PrizeStructure({
+            firstPlace: 5000,        // 50% to winner
+            secondPlace: 2500,       // 25% to runner-up
+            thirdPlace: 1000,        // 10% to third place
+            participationBonus: 1000, // 10% distributed to all participants
+            organizerFee: 500,       // 5% to organizer
+            platformFee: 500         // 5% to platform
+        });
         
-        // Round robin distributions
-        prizeTemplates["round_robin"] = [3000, 2000, 1500, 1000, 750, 500, 250]; // Top 7
+        // Set tier requirements
+        tierMinLevel[TournamentTier.ROOKIE] = 1;
+        tierMaxLevel[TournamentTier.ROOKIE] = 10;
+        tierEntryFee[TournamentTier.ROOKIE] = 50 * 10**18;
+        
+        tierMinLevel[TournamentTier.AMATEUR] = 11;
+        tierMaxLevel[TournamentTier.AMATEUR] = 25;
+        tierEntryFee[TournamentTier.AMATEUR] = 200 * 10**18;
+        
+        tierMinLevel[TournamentTier.PROFESSIONAL] = 26;
+        tierMaxLevel[TournamentTier.PROFESSIONAL] = 50;
+        tierEntryFee[TournamentTier.PROFESSIONAL] = 500 * 10**18;
+        
+        tierMinLevel[TournamentTier.CHAMPION] = 51;
+        tierMaxLevel[TournamentTier.CHAMPION] = 75;
+        tierEntryFee[TournamentTier.CHAMPION] = 1000 * 10**18;
+        
+        tierMinLevel[TournamentTier.LEGENDARY] = 76;
+        tierMaxLevel[TournamentTier.LEGENDARY] = 100;
+        tierEntryFee[TournamentTier.LEGENDARY] = 2000 * 10**18;
     }
     
     // ============================================================================
@@ -206,312 +211,143 @@ contract Tournament is Ownable, ReentrancyGuard, Pausable, IRandomnessConsumer {
         string calldata name,
         string calldata description,
         TournamentType tournamentType,
-        uint256 entryFee,
+        TournamentTier tier,
         uint256 maxParticipants,
-        uint8 requiredElement,
-        uint8 minRarity,
-        uint8 maxRarity,
-        uint16 minLevel,
-        uint16 maxLevel,
         uint32 registrationDuration,
-        string calldata prizeTemplate
+        uint32 tournamentDuration,
+        uint8 requiredRarity,
+        uint8 requiredElement,
+        bool isSeasonalChampionship
     ) external nonReentrant whenNotPaused returns (uint256) {
-        require(bytes(name).length > 0, "Name cannot be empty");
-        require(maxParticipants >= minTournamentSize && maxParticipants <= maxTournamentSize, "Invalid participant count");
-        require(minRarity <= maxRarity, "Invalid rarity range");
-        require(minLevel <= maxLevel, "Invalid level range");
-        require(prizeTemplates[prizeTemplate].length > 0, "Invalid prize template");
         
+        require(bytes(name).length > 0 && bytes(name).length <= 100, "Invalid name length");
+        require(maxParticipants >= 4 && maxParticipants <= 256, "Invalid participant count");
+        require(maxParticipants & (maxParticipants - 1) == 0, "Participant count must be power of 2");
+        
+        uint256 entryFee = tierEntryFee[tier];
         uint256 tournamentId = nextTournamentId++;
-        uint32 currentTime = uint32(block.timestamp);
         
-        tournaments[tournamentId] = TournamentConfig({
-            id: tournamentId,
-            name: name,
-            description: description,
-            tournamentType: tournamentType,
-            status: TournamentStatus.REGISTRATION,
-            organizer: msg.sender,
-            entryFee: entryFee,
-            maxParticipants: maxParticipants,
-            currentParticipants: 0,
-            requiredElement: requiredElement,
-            minRarity: minRarity,
-            maxRarity: maxRarity,
-            minLevel: minLevel,
-            maxLevel: maxLevel,
-            registrationStart: currentTime,
-            registrationEnd: currentTime + registrationDuration,
-            tournamentStart: 0,
-            tournamentEnd: 0,
-            prizePool: 0,
-            isSponsored: false,
-            sponsor: address(0),
-            prizeDistribution: prizeTemplates[prizeTemplate]
-        });
+        Tournament storage tournament = tournaments[tournamentId];
+        tournament.id = tournamentId;
+        tournament.name = name;
+        tournament.description = description;
+        tournament.tournamentType = tournamentType;
+        tournament.status = TournamentStatus.REGISTRATION;
+        tournament.tier = tier;
+        tournament.entryFee = entryFee;
+        tournament.prizePool = 0;
+        tournament.maxParticipants = maxParticipants;
+        tournament.currentParticipants = 0;
+        tournament.registrationStart = uint32(block.timestamp);
+        tournament.registrationEnd = uint32(block.timestamp) + registrationDuration;
+        tournament.tournamentStart = tournament.registrationEnd;
+        tournament.tournamentEnd = tournament.tournamentStart + tournamentDuration;
+        tournament.minLevel = uint8(tierMinLevel[tier]);
+        tournament.maxLevel = uint8(tierMaxLevel[tier]);
+        tournament.requiredRarity = requiredRarity;
+        tournament.requiredElement = requiredElement;
+        tournament.organizer = msg.sender;
+        tournament.isSeasonalChampionship = isSeasonalChampionship;
         
-        upcomingTournaments.push(tournamentId);
+        // Initialize bracket
+        brackets[tournamentId].tournamentId = tournamentId;
+        brackets[tournamentId].currentRound = 0;
+        brackets[tournamentId].totalRounds = _calculateTotalRounds(maxParticipants);
         
-        emit TournamentCreated(tournamentId, name, msg.sender, tournamentType);
+        // Initialize betting pool
+        bettingPools[tournamentId].tournamentId = tournamentId;
+        bettingPools[tournamentId].bettingOpen = true;
+        
+        tierTournaments[tier].push(tournamentId);
+        
+        emit TournamentCreated(tournamentId, name, tournamentType, tier);
         return tournamentId;
     }
     
-    function sponsorTournament(uint256 tournamentId, uint256 sponsorAmount) external nonReentrant {
-        require(tournaments[tournamentId].id != 0, "Tournament does not exist");
-        require(tournaments[tournamentId].status == TournamentStatus.REGISTRATION, "Registration ended");
-        require(gameToken.balanceOf(msg.sender) >= sponsorAmount, "Insufficient tokens");
-        
-        gameToken.transferFrom(msg.sender, address(this), sponsorAmount);
-        
-        tournaments[tournamentId].prizePool += sponsorAmount;
-        tournaments[tournamentId].isSponsored = true;
-        tournaments[tournamentId].sponsor = msg.sender;
+    function _calculateTotalRounds(uint256 participants) internal pure returns (uint8) {
+        uint8 rounds = 0;
+        while (participants > 1) {
+            participants = participants / 2;
+            rounds++;
+        }
+        return rounds;
     }
     
     // ============================================================================
-    // REGISTRATION SYSTEM
+    // TOURNAMENT REGISTRATION
     // ============================================================================
     
     function registerForTournament(uint256 tournamentId, uint256 petId) external nonReentrant whenNotPaused {
-        TournamentConfig storage tournament = tournaments[tournamentId];
-        require(tournament.id != 0, "Tournament does not exist");
+        Tournament storage tournament = tournaments[tournamentId];
+        require(tournament.id == tournamentId, "Tournament does not exist");
         require(tournament.status == TournamentStatus.REGISTRATION, "Registration not open");
-        require(block.timestamp <= tournament.registrationEnd, "Registration ended");
+        require(block.timestamp <= tournament.registrationEnd, "Registration period ended");
         require(tournament.currentParticipants < tournament.maxParticipants, "Tournament full");
+        require(!tournament.hasRegistered[msg.sender], "Already registered");
         require(petContract.ownerOf(petId) == msg.sender, "Not pet owner");
-        require(registrations[tournamentId][msg.sender].player == address(0), "Already registered");
         
         PetNFT.Pet memory pet = petContract.getPet(petId);
-        _validatePetRequirements(tournament, pet);
         
-        // Collect entry fee
-        if (tournament.entryFee > 0) {
-            require(gameToken.balanceOf(msg.sender) >= tournament.entryFee, "Insufficient tokens");
-            gameToken.transferFrom(msg.sender, address(this), tournament.entryFee);
-            
-            // Add to prize pool (minus platform fee)
-            uint256 platformFee = (tournament.entryFee * platformFeePercentage) / 100;
-            uint256 prizeContribution = tournament.entryFee - platformFee;
-            tournament.prizePool += prizeContribution;
-            
-            // Transfer platform fee
-            gameToken.transfer(treasuryAddress, platformFee);
+        // Validate pet requirements
+        require(pet.level >= tournament.minLevel && pet.level <= tournament.maxLevel, "Pet level not in range");
+        
+        if (tournament.requiredRarity < 255) {
+            require(pet.rarity >= tournament.requiredRarity, "Pet rarity too low");
         }
         
-        registrations[tournamentId][msg.sender] = PlayerRegistration({
-            player: msg.sender,
-            petId: petId,
-            registrationTime: uint32(block.timestamp),
-            checkedIn: false,
-            checkInTime: 0,
-            currentRound: 0,
-            eliminated: false,
-            wins: 0,
-            losses: 0,
-            totalScore: 0
-        });
+        if (tournament.requiredElement < 255) {
+            require(pet.element == tournament.requiredElement, "Wrong element required");
+        }
         
+        // Check entry fee
+        require(gameToken.balanceOf(msg.sender) >= tournament.entryFee, "Insufficient entry fee");
+        
+        // Transfer entry fee
+        gameToken.transferFrom(msg.sender, address(this), tournament.entryFee);
+        
+        // Register player
+        tournament.hasRegistered[msg.sender] = true;
+        tournament.participantPets.push(petId);
+        tournament.petToOwner[petId] = tournament.currentParticipants;
         tournament.currentParticipants++;
+        tournament.prizePool += tournament.entryFee;
+        
+        playerTournaments[msg.sender].push(tournamentId);
         
         emit PlayerRegistered(tournamentId, msg.sender, petId);
-    }
-    
-    function _validatePetRequirements(TournamentConfig storage tournament, PetNFT.Pet memory pet) internal pure {
-        if (tournament.requiredElement < 8) {
-            require(pet.element == tournament.requiredElement, "Wrong element");
+        
+        // Start tournament if full
+        if (tournament.currentParticipants == tournament.maxParticipants) {
+            _startTournament(tournamentId);
         }
-        
-        require(pet.rarity >= tournament.minRarity && pet.rarity <= tournament.maxRarity, "Rarity not allowed");
-        require(pet.level >= tournament.minLevel && pet.level <= tournament.maxLevel, "Level not allowed");
-        require(pet.hp > 0, "Pet must have HP");
-        require(pet.energy >= 50, "Pet needs energy");
-    }
-    
-    function checkInForTournament(uint256 tournamentId) external {
-        require(tournaments[tournamentId].status == TournamentStatus.READY, "Check-in not available");
-        require(registrations[tournamentId][msg.sender].player == msg.sender, "Not registered");
-        require(!registrations[tournamentId][msg.sender].checkedIn, "Already checked in");
-        
-        registrations[tournamentId][msg.sender].checkedIn = true;
-        registrations[tournamentId][msg.sender].checkInTime = uint32(block.timestamp);
-    }
-    
-    function withdrawFromTournament(uint256 tournamentId) external nonReentrant {
-        TournamentConfig storage tournament = tournaments[tournamentId];
-        require(tournament.status == TournamentStatus.REGISTRATION, "Cannot withdraw now");
-        require(registrations[tournamentId][msg.sender].player == msg.sender, "Not registered");
-        
-        // Refund entry fee
-        if (tournament.entryFee > 0) {
-            uint256 refundAmount = (tournament.entryFee * 90) / 100; // 10% penalty
-            gameToken.transfer(msg.sender, refundAmount);
-            tournament.prizePool -= (tournament.entryFee - (tournament.entryFee * platformFeePercentage) / 100);
-        }
-        
-        delete registrations[tournamentId][msg.sender];
-        tournament.currentParticipants--;
     }
     
     // ============================================================================
     // TOURNAMENT MANAGEMENT
     // ============================================================================
     
-    function startTournament(uint256 tournamentId) external nonReentrant {
-        TournamentConfig storage tournament = tournaments[tournamentId];
-        require(msg.sender == tournament.organizer || msg.sender == owner(), "Not authorized");
-        require(tournament.status == TournamentStatus.REGISTRATION || tournament.status == TournamentStatus.READY, "Cannot start");
-        require(tournament.currentParticipants >= minTournamentSize, "Not enough participants");
+    function startTournament(uint256 tournamentId) external {
+        Tournament storage tournament = tournaments[tournamentId];
+        require(tournament.organizer == msg.sender || msg.sender == owner(), "Not authorized");
+        require(tournament.status == TournamentStatus.REGISTRATION, "Tournament not in registration");
+        require(block.timestamp >= tournament.registrationEnd, "Registration period not ended");
+        require(tournament.currentParticipants >= 4, "Not enough participants");
         
+        _startTournament(tournamentId);
+    }
+    
+    function _startTournament(uint256 tournamentId) internal {
+        Tournament storage tournament = tournaments[tournamentId];
         tournament.status = TournamentStatus.ACTIVE;
-        tournament.tournamentStart = uint32(block.timestamp);
         
-        // Move from upcoming to active
-        _removeFromUpcoming(tournamentId);
-        activeTournaments.push(tournamentId);
-        
-        // Generate initial bracket and matches
-        _generateInitialBracket(tournamentId);
-        
-        emit TournamentStarted(tournamentId, tournament.prizePool);
-    }
-    
-    function _generateInitialBracket(uint256 tournamentId) internal {
-        TournamentConfig storage tournament = tournaments[tournamentId];
-        
-        if (tournament.tournamentType == TournamentType.SINGLE_ELIMINATION || 
-            tournament.tournamentType == TournamentType.DOUBLE_ELIMINATION) {
-            _generateEliminationBracket(tournamentId);
-        } else if (tournament.tournamentType == TournamentType.ROUND_ROBIN) {
-            _generateRoundRobinMatches(tournamentId);
-        } else if (tournament.tournamentType == TournamentType.SWISS_SYSTEM) {
-            _generateSwissRound(tournamentId, 1);
-        }
-    }
-    
-    function _generateEliminationBracket(uint256 tournamentId) internal {
-        TournamentConfig storage tournament = tournaments[tournamentId];
-        
-        // Get all registered players
-        address[] memory players = _getRegisteredPlayers(tournamentId);
-        uint256 playerCount = players.length;
-        
-        // Calculate bracket size (next power of 2)
-        uint256 bracketSize = 1;
-        while (bracketSize < playerCount) {
-            bracketSize *= 2;
-        }
-        
-        // Calculate total rounds
-        uint8 totalRounds = 0;
-        uint256 temp = bracketSize;
-        while (temp > 1) {
-            temp /= 2;
-            totalRounds++;
-        }
-        
-        brackets[tournamentId].totalRounds = totalRounds;
-        brackets[tournamentId].currentRound = 1;
+        // Close betting
+        bettingPools[tournamentId].bettingOpen = false;
         
         // Generate first round matches
-        _generateRoundMatches(tournamentId, 1, players);
-    }
-    
-    function _generateRoundMatches(uint256 tournamentId, uint8 round, address[] memory players) internal {
-        uint256 matchCount = players.length / 2;
+        uint256 requestId = randomContract.requestRandomnessForEvent(tournamentId);
+        randomRequestToMatch[requestId] = tournamentId;
         
-        for (uint256 i = 0; i < matchCount; i++) {
-            uint256 matchId = nextMatchId++;
-            address player1 = players[i * 2];
-            address player2 = players[i * 2 + 1];
-            
-            matches[matchId] = TournamentMatch({
-                matchId: matchId,
-                tournamentId: tournamentId,
-                round: round,
-                matchNumber: uint8(i + 1),
-                player1: player1,
-                player2: player2,
-                pet1: registrations[tournamentId][player1].petId,
-                pet2: registrations[tournamentId][player2].petId,
-                status: MatchStatus.PENDING,
-                winner: address(0),
-                winnerPet: 0,
-                scheduledTime: uint32(block.timestamp) + 300, // 5 minutes from now
-                completedTime: 0,
-                randomnessRequestId: 0,
-                result: MatchResult(0, 0, 0, false, false, 0, 0)
-            });
-            
-            brackets[tournamentId].roundMatches[round].push(matchId);
-            
-            emit MatchCreated(matchId, tournamentId, player1, player2);
-        }
-    }
-    
-    function _generateRoundRobinMatches(uint256 tournamentId) internal {
-        address[] memory players = _getRegisteredPlayers(tournamentId);
-        uint256 playerCount = players.length;
-        
-        // Generate all possible matches
-        uint8 round = 1;
-        for (uint256 i = 0; i < playerCount; i++) {
-            for (uint256 j = i + 1; j < playerCount; j++) {
-                uint256 matchId = nextMatchId++;
-                
-                matches[matchId] = TournamentMatch({
-                    matchId: matchId,
-                    tournamentId: tournamentId,
-                    round: round,
-                    matchNumber: uint8(brackets[tournamentId].roundMatches[round].length + 1),
-                    player1: players[i],
-                    player2: players[j],
-                    pet1: registrations[tournamentId][players[i]].petId,
-                    pet2: registrations[tournamentId][players[j]].petId,
-                    status: MatchStatus.PENDING,
-                    winner: address(0),
-                    winnerPet: 0,
-                    scheduledTime: uint32(block.timestamp) + (300 * brackets[tournamentId].roundMatches[round].length),
-                    completedTime: 0,
-                    randomnessRequestId: 0,
-                    result: MatchResult(0, 0, 0, false, false, 0, 0)
-                });
-                
-                brackets[tournamentId].roundMatches[round].push(matchId);
-                
-                emit MatchCreated(matchId, tournamentId, players[i], players[j]);
-            }
-        }
-    }
-    
-    function _generateSwissRound(uint256 tournamentId, uint8 round) internal {
-        address[] memory players = _getRegisteredPlayers(tournamentId);
-        
-        // For Swiss system, pair players with similar scores
-        // Simplified pairing for round 1 (random)
-        if (round == 1) {
-            _generateRoundMatches(tournamentId, round, players);
-        } else {
-            // TODO: Implement Swiss pairing algorithm
-            // This would pair players based on current standings
-        }
-    }
-    
-    // ============================================================================
-    // MATCH EXECUTION
-    // ============================================================================
-    
-    function startMatch(uint256 matchId) external nonReentrant {
-        TournamentMatch storage match = matches[matchId];
-        require(match.status == MatchStatus.PENDING, "Match not pending");
-        require(block.timestamp >= match.scheduledTime, "Match not ready");
-        require(msg.sender == match.player1 || msg.sender == match.player2 || msg.sender == owner(), "Not authorized");
-        
-        match.status = MatchStatus.IN_PROGRESS;
-        
-        // Request randomness for battle outcome
-        uint256 requestId = randomContract.requestRandomnessForBattle(matchId);
-        match.randomnessRequestId = requestId;
-        randomRequestToMatch[requestId] = matchId;
+        emit TournamentStarted(tournamentId, tournament.currentParticipants);
     }
     
     function onRandomnessFulfilled(
@@ -520,540 +356,552 @@ contract Tournament is Ownable, ReentrancyGuard, Pausable, IRandomnessConsumer {
         uint256 targetId,
         uint256[] calldata randomWords
     ) external override {
-        require(msg.sender == address(randomContract), "Only random contract");
-        require(requestType == 1, "Invalid request type for tournament");
+        require(msg.sender == address(randomContract), "Only random contract can call");
         
-        uint256 matchId = randomRequestToMatch[requestId];
-        require(matchId != 0, "Match not found");
-        
-        _completeMatch(matchId, randomWords);
+        if (requestType == 3) { // Tournament bracket generation
+            uint256 tournamentId = randomRequestToMatch[requestId];
+            _generateBracket(tournamentId, randomWords[0]);
+        }
     }
     
-    function _completeMatch(uint256 matchId, uint256[] memory randomWords) internal {
-        TournamentMatch storage match = matches[matchId];
-        require(match.status == MatchStatus.IN_PROGRESS, "Match not in progress");
+    function _generateBracket(uint256 tournamentId, uint256 randomSeed) internal {
+        Tournament storage tournament = tournaments[tournamentId];
+        Bracket storage bracket = brackets[tournamentId];
         
+        // Shuffle participants
+        uint256[] memory shuffledPets = _shuffleArray(tournament.participantPets, randomSeed);
+        
+        // Create first round matches
+        bracket.currentRound = 1;
+        uint256 matchesInRound = shuffledPets.length / 2;
+        
+        for (uint256 i = 0; i < matchesInRound; i++) {
+            uint256 pet1 = shuffledPets[i * 2];
+            uint256 pet2 = shuffledPets[i * 2 + 1];
+            
+            uint256 matchId = _createMatch(
+                tournamentId,
+                1, // Round 1
+                0, // Main bracket
+                pet1,
+                pet2
+            );
+            
+            bracket.roundMatches[1].push(matchId);
+        }
+        
+        bracket.currentMatches = bracket.roundMatches[1];
+    }
+    
+    function _shuffleArray(uint256[] memory array, uint256 seed) internal pure returns (uint256[] memory) {
+        uint256[] memory shuffled = new uint256[](array.length);
+        for (uint256 i = 0; i < array.length; i++) {
+            shuffled[i] = array[i];
+        }
+        
+        for (uint256 i = array.length - 1; i > 0; i--) {
+            uint256 j = uint256(keccak256(abi.encode(seed, i))) % (i + 1);
+            (shuffled[i], shuffled[j]) = (shuffled[j], shuffled[i]);
+        }
+        
+        return shuffled;
+    }
+    
+    function _createMatch(
+        uint256 tournamentId,
+        uint8 round,
+        uint8 bracketType,
+        uint256 pet1,
+        uint256 pet2
+    ) internal returns (uint256) {
+        uint256 matchId = nextMatchId++;
+        
+        matches[matchId] = TournamentMatch({
+            matchId: matchId,
+            tournamentId: tournamentId,
+            round: round,
+            bracket: bracketType,
+            pet1: pet1,
+            pet2: pet2,
+            player1: petContract.ownerOf(pet1),
+            player2: petContract.ownerOf(pet2),
+            winner: 0,
+            winnerAddress: address(0),
+            status: MatchStatus.SCHEDULED,
+            scheduledTime: uint32(block.timestamp) + 3600, // 1 hour from now
+            battleId: 0,
+            randomnessRequestId: 0
+        });
+        
+        emit MatchScheduled(matchId, tournamentId, pet1, pet2);
+        return matchId;
+    }
+    
+    // ============================================================================
+    // MATCH EXECUTION
+    // ============================================================================
+    
+    function executeMatch(uint256 matchId) external nonReentrant {
+        TournamentMatch storage match = matches[matchId];
+        require(match.status == MatchStatus.SCHEDULED, "Match not scheduled");
+        require(block.timestamp >= match.scheduledTime, "Match not ready");
+        
+        match.status = MatchStatus.IN_PROGRESS;
+        
+        // Request randomness for match outcome
+        uint256 requestId = randomContract.requestRandomnessForBattle(matchId);
+        match.randomnessRequestId = requestId;
+        randomRequestToMatch[requestId] = matchId;
+    }
+    
+    function _resolveMatch(uint256 matchId, uint256[] memory randomWords) internal {
+        TournamentMatch storage match = matches[matchId];
+        
+        // Get pet stats for battle calculation
         PetNFT.Pet memory pet1 = petContract.getPet(match.pet1);
         PetNFT.Pet memory pet2 = petContract.getPet(match.pet2);
         
-        // Calculate battle outcome
+        // Calculate battle power
         uint256 pet1Power = _calculateBattlePower(pet1);
         uint256 pet2Power = _calculateBattlePower(pet2);
         
-        (address winner, uint256 winnerPet, MatchResult memory result) = _simulateBattle(
-            match.player1, match.player2, match.pet1, match.pet2, 
-            pet1Power, pet2Power, randomWords
-        );
-        
-        match.winner = winner;
-        match.winnerPet = winnerPet;
-        match.status = MatchStatus.COMPLETED;
-        match.completedTime = uint32(block.timestamp);
-        match.result = result;
-        
-        // Update player stats
-        if (winner == match.player1) {
-            registrations[match.tournamentId][match.player1].wins++;
-            registrations[match.tournamentId][match.player2].losses++;
-        } else {
-            registrations[match.tournamentId][match.player2].wins++;
-            registrations[match.tournamentId][match.player1].losses++;
-        }
-        
-        // Update pet experience and stats
-        _updatePetAfterMatch(match.pet1, winner == match.player1);
-        _updatePetAfterMatch(match.pet2, winner == match.player2);
-        
-        emit MatchCompleted(matchId, winner, result);
-        
-        // Check if tournament round is complete
-        _checkRoundCompletion(match.tournamentId, match.round);
-    }
-    
-    function _simulateBattle(
-        address player1,
-        address player2,
-        uint256 pet1,
-        uint256 pet2,
-        uint256 pet1Power,
-        uint256 pet2Power,
-        uint256[] memory randomWords
-    ) internal pure returns (address winner, uint256 winnerPet, MatchResult memory result) {
-        
-        // Simulate battle using randomness
+        // Use randomness to determine winner
         uint256 totalPower = pet1Power + pet2Power;
-        uint256 pet1Chance = (pet1Power * 10000) / totalPower;
+        uint256 randomValue = randomWords[0] % totalPower;
         
-        bool pet1Wins = (randomWords[0] % 10000) < pet1Chance;
-        
-        result.pet1Damage = uint16(pet1Power / 10 + (randomWords[1] % 20));
-        result.pet2Damage = uint16(pet2Power / 10 + (randomWords[2] % 20));
-        result.totalRounds = uint8(3 + (randomWords[0] % 5));
-        result.pet1Critical = (randomWords[1] % 100) < 15;
-        result.pet2Critical = (randomWords[2] % 100) < 15;
-        
-        if (pet1Wins) {
-            winner = player1;
-            winnerPet = pet1;
-            result.pet1FinalHP = uint16(50 + (randomWords[0] % 50));
-            result.pet2FinalHP = 0;
+        if (randomValue < pet1Power) {
+            match.winner = match.pet1;
+            match.winnerAddress = match.player1;
         } else {
-            winner = player2;
-            winnerPet = pet2;
-            result.pet1FinalHP = 0;
-            result.pet2FinalHP = uint16(50 + (randomWords[1] % 50));
+            match.winner = match.pet2;
+            match.winnerAddress = match.player2;
         }
+        
+        match.status = MatchStatus.COMPLETED;
+        
+        // Update bracket
+        _advanceWinner(match.tournamentId, matchId, match.winner, match.winnerAddress);
+        
+        emit MatchCompleted(matchId, match.winner, match.winnerAddress);
     }
     
     function _calculateBattlePower(PetNFT.Pet memory pet) internal pure returns (uint256) {
-        return (uint256(pet.strength) * 3 + 
-                uint256(pet.speed) * 2 + 
-                uint256(pet.defense) * 2 + 
+        return (uint256(pet.strength) * 2 + 
+                uint256(pet.speed) + 
+                uint256(pet.defense) + 
                 uint256(pet.intelligence)) * uint256(pet.level);
     }
     
-    function _updatePetAfterMatch(uint256 petId, bool won) internal {
-        PetNFT.Pet memory pet = petContract.getPet(petId);
+    function _advanceWinner(uint256 tournamentId, uint256 matchId, uint256 winnerPet, address winnerAddress) internal {
+        Bracket storage bracket = brackets[tournamentId];
+        Tournament storage tournament = tournaments[tournamentId];
         
-        // Award experience
-        pet.experience += won ? 100 : 50;
-        
-        // Reduce energy
-        pet.energy = pet.energy > 40 ? pet.energy - 40 : 10;
-        
-        // Update battle stats
-        if (won) {
-            pet.battleWins++;
-        } else {
-            pet.battleLosses++;
-        }
-        
-        petContract.updatePetStats(petId, pet);
-    }
-    
-    // ============================================================================
-    // TOURNAMENT PROGRESSION
-    // ============================================================================
-    
-    function _checkRoundCompletion(uint256 tournamentId, uint8 round) internal {
-        uint256[] storage roundMatches = brackets[tournamentId].roundMatches[round];
-        bool allComplete = true;
-        
-        for (uint256 i = 0; i < roundMatches.length; i++) {
-            if (matches[roundMatches[i]].status != MatchStatus.COMPLETED) {
-                allComplete = false;
+        // Check if round is complete
+        bool roundComplete = true;
+        for (uint256 i = 0; i < bracket.currentMatches.length; i++) {
+            if (matches[bracket.currentMatches[i]].status != MatchStatus.COMPLETED) {
+                roundComplete = false;
                 break;
             }
         }
         
-        if (allComplete) {
-            _advanceToNextRound(tournamentId, round);
+        if (roundComplete) {
+            if (bracket.currentRound == bracket.totalRounds) {
+                // Tournament complete
+                _completeTournament(tournamentId, winnerAddress);
+            } else {
+                // Advance to next round
+                _createNextRound(tournamentId);
+            }
         }
     }
     
-    function _advanceToNextRound(uint256 tournamentId, uint8 currentRound) internal {
-        TournamentConfig storage tournament = tournaments[tournamentId];
+    function _createNextRound(uint256 tournamentId) internal {
+        Bracket storage bracket = brackets[tournamentId];
+        bracket.currentRound++;
         
-        if (tournament.tournamentType == TournamentType.SINGLE_ELIMINATION || 
-            tournament.tournamentType == TournamentType.DOUBLE_ELIMINATION) {
-            _advanceEliminationTournament(tournamentId, currentRound);
-        } else if (tournament.tournamentType == TournamentType.ROUND_ROBIN) {
-            _checkRoundRobinCompletion(tournamentId);
-        } else if (tournament.tournamentType == TournamentType.SWISS_SYSTEM) {
-            _advanceSwissTournament(tournamentId, currentRound);
+        // Collect winners from current matches
+        uint256[] memory winners = new uint256[](bracket.currentMatches.length);
+        for (uint256 i = 0; i < bracket.currentMatches.length; i++) {
+            winners[i] = matches[bracket.currentMatches[i]].winner;
         }
-    }
-    
-    function _advanceEliminationTournament(uint256 tournamentId, uint8 currentRound) internal {
-        uint256[] storage roundMatches = brackets[tournamentId].roundMatches[currentRound];
-        address[] memory winners = new address[](roundMatches.length);
         
-        // Collect winners from current round
-        for (uint256 i = 0; i < roundMatches.length; i++) {
-            winners[i] = matches[roundMatches[i]].winner;
+        // Create next round matches
+        uint256 nextRoundMatches = winners.length / 2;
+        delete bracket.currentMatches;
+        
+        for (uint256 i = 0; i < nextRoundMatches; i++) {
+            uint256 matchId = _createMatch(
+                tournamentId,
+                bracket.currentRound,
+                0,
+                winners[i * 2],
+                winners[i * 2 + 1]
+            );
             
-            // Mark losers as eliminated
-            address loser = matches[roundMatches[i]].winner == matches[roundMatches[i]].player1 ? 
-                matches[roundMatches[i]].player2 : matches[roundMatches[i]].player1;
-            registrations[tournamentId][loser].eliminated = true;
+            bracket.roundMatches[bracket.currentRound].push(matchId);
+            bracket.currentMatches.push(matchId);
         }
-        
-        if (winners.length == 1) {
-            // Tournament finished
-            _finishTournament(tournamentId, winners[0]);
-        } else {
-            // Generate next round
-            brackets[tournamentId].currentRound++;
-            _generateRoundMatches(tournamentId, currentRound + 1, winners);
-        }
-    }
-    
-    function _checkRoundRobinCompletion(uint256 tournamentId) internal {
-        // For round robin, check if all matches are complete
-        uint256[] storage allMatches = brackets[tournamentId].roundMatches[1];
-        bool allComplete = true;
-        
-        for (uint256 i = 0; i < allMatches.length; i++) {
-            if (matches[allMatches[i]].status != MatchStatus.COMPLETED) {
-                allComplete = false;
-                break;
-            }
-        }
-        
-        if (allComplete) {
-            address winner = _calculateRoundRobinWinner(tournamentId);
-            _finishTournament(tournamentId, winner);
-        }
-    }
-    
-    function _calculateRoundRobinWinner(uint256 tournamentId) internal view returns (address) {
-        address[] memory players = _getRegisteredPlayers(tournamentId);
-        address winner = players[0];
-        uint256 maxWins = registrations[tournamentId][winner].wins;
-        
-        for (uint256 i = 1; i < players.length; i++) {
-            uint256 playerWins = registrations[tournamentId][players[i]].wins;
-            if (playerWins > maxWins) {
-                maxWins = playerWins;
-                winner = players[i];
-            }
-        }
-        
-        return winner;
-    }
-    
-    function _advanceSwissTournament(uint256 tournamentId, uint8 currentRound) internal {
-        TournamentConfig storage tournament = tournaments[tournamentId];
-        
-        // Swiss tournaments typically run for log2(n) + 1 rounds
-        uint8 maxRounds = 5; // Configurable based on participant count
-        
-        if (currentRound < maxRounds) {
-            brackets[tournamentId].currentRound++;
-            _generateSwissRound(tournamentId, currentRound + 1);
-        } else {
-            address winner = _calculateSwissWinner(tournamentId);
-            _finishTournament(tournamentId, winner);
-        }
-    }
-    
-    function _calculateSwissWinner(uint256 tournamentId) internal view returns (address) {
-        address[] memory players = _getRegisteredPlayers(tournamentId);
-        address winner = players[0];
-        uint256 maxScore = registrations[tournamentId][winner].totalScore;
-        
-        for (uint256 i = 1; i < players.length; i++) {
-            uint256 playerScore = registrations[tournamentId][players[i]].totalScore;
-            if (playerScore > maxScore) {
-                maxScore = playerScore;
-                winner = players[i];
-            }
-        }
-        
-        return winner;
     }
     
     // ============================================================================
-    // TOURNAMENT COMPLETION AND PRIZES
+    // TOURNAMENT COMPLETION
     // ============================================================================
     
-    function _finishTournament(uint256 tournamentId, address winner) internal {
-        TournamentConfig storage tournament = tournaments[tournamentId];
-        tournament.status = TournamentStatus.FINISHED;
-        tournament.tournamentEnd = uint32(block.timestamp);
-        
-        // Calculate final standings
-        address[] memory finalStandings = _calculateFinalStandings(tournamentId);
-        brackets[tournamentId].finalStandings = finalStandings;
+    function _completeTournament(uint256 tournamentId, address winner) internal {
+        Tournament storage tournament = tournaments[tournamentId];
+        tournament.status = TournamentStatus.COMPLETED;
         
         // Distribute prizes
-        _distributePrizes(tournamentId, finalStandings);
+        _distributePrizes(tournamentId, winner);
         
-        // Remove from active tournaments
-        _removeFromActive(tournamentId);
-        
-        emit TournamentFinished(tournamentId, winner, tournament.prizePool);
-    }
-    
-    function _calculateFinalStandings(uint256 tournamentId) internal view returns (address[] memory) {
-        address[] memory players = _getRegisteredPlayers(tournamentId);
-        TournamentConfig storage tournament = tournaments[tournamentId];
-        
-        // Sort players based on tournament type
-        if (tournament.tournamentType == TournamentType.ROUND_ROBIN || 
-            tournament.tournamentType == TournamentType.SWISS_SYSTEM) {
-            return _sortPlayersByWins(tournamentId, players);
-        } else {
-            return _sortPlayersByEliminationRound(tournamentId, players);
+        // Update season points if applicable
+        if (currentSeasonId > 0) {
+            _updateSeasonPoints(tournamentId, winner);
         }
+        
+        uint256 winnerPrize = (tournament.prizePool * defaultPrizeStructure.firstPlace) / 10000;
+        emit TournamentCompleted(tournamentId, winner, winnerPrize);
     }
     
-    function _sortPlayersByWins(uint256 tournamentId, address[] memory players) internal view returns (address[] memory) {
-        // Simple bubble sort by wins (in production, use more efficient sorting)
-        for (uint256 i = 0; i < players.length - 1; i++) {
-            for (uint256 j = 0; j < players.length - i - 1; j++) {
-                if (registrations[tournamentId][players[j]].wins < 
-                    registrations[tournamentId][players[j + 1]].wins) {
-                    address temp = players[j];
-                    players[j] = players[j + 1];
-                    players[j + 1] = temp;
-                }
+    function _distributePrizes(uint256 tournamentId, address winner) internal {
+        Tournament storage tournament = tournaments[tournamentId];
+        uint256 prizePool = tournament.prizePool;
+        
+        // Calculate prize amounts
+        uint256 winnerPrize = (prizePool * defaultPrizeStructure.firstPlace) / 10000;
+        uint256 runnerUpPrize = (prizePool * defaultPrizeStructure.secondPlace) / 10000;
+        uint256 thirdPlacePrize = (prizePool * defaultPrizeStructure.thirdPlace) / 10000;
+        uint256 participationBonus = (prizePool * defaultPrizeStructure.participationBonus) / 10000;
+        uint256 organizerFee = (prizePool * defaultPrizeStructure.organizerFee) / 10000;
+        uint256 platformFee = (prizePool * defaultPrizeStructure.platformFee) / 10000;
+        
+        // Distribute prizes
+        gameToken.mintPlayerRewards(winner, winnerPrize);
+        
+        // Find runner-up and third place (simplified - would need proper tracking)
+        address runnerUp = _findRunnerUp(tournamentId);
+        address thirdPlace = _findThirdPlace(tournamentId);
+        
+        if (runnerUp != address(0)) {
+            gameToken.mintPlayerRewards(runnerUp, runnerUpPrize);
+        }
+        
+        if (thirdPlace != address(0)) {
+            gameToken.mintPlayerRewards(thirdPlace, thirdPlacePrize);
+        }
+        
+        // Distribute participation bonus
+        uint256 bonusPerPlayer = participationBonus / tournament.currentParticipants;
+        for (uint256 i = 0; i < tournament.participantPets.length; i++) {
+            address player = petContract.ownerOf(tournament.participantPets[i]);
+            gameToken.mintPlayerRewards(player, bonusPerPlayer);
+        }
+        
+        // Pay fees
+        gameToken.mintPlayerRewards(tournament.organizer, organizerFee);
+        gameToken.mintPlayerRewards(owner(), platformFee);
+    }
+    
+    function _findRunnerUp(uint256 tournamentId) internal view returns (address) {
+        // Simplified implementation - find opponent in final match
+        Bracket storage bracket = brackets[tournamentId];
+        if (bracket.roundMatches[bracket.totalRounds].length > 0) {
+            uint256 finalMatchId = bracket.roundMatches[bracket.totalRounds][0];
+            TournamentMatch storage finalMatch = matches[finalMatchId];
+            
+            if (finalMatch.winnerAddress == finalMatch.player1) {
+                return finalMatch.player2;
+            } else {
+                return finalMatch.player1;
             }
         }
-        return players;
+        return address(0);
     }
     
-    function _sortPlayersByEliminationRound(uint256 tournamentId, address[] memory players) internal view returns (address[] memory) {
-        // Sort by elimination round (later elimination = higher placement)
-        // Simplified implementation
-        return players;
-    }
-    
-    function _distributePrizes(uint256 tournamentId, address[] memory finalStandings) internal {
-        TournamentConfig storage tournament = tournaments[tournamentId];
-        uint256 totalPrize = tournament.prizePool;
-        
-        for (uint256 i = 0; i < tournament.prizeDistribution.length && i < finalStandings.length; i++) {
-            uint256 prizeAmount = (totalPrize * tournament.prizeDistribution[i]) / 10000;
-            if (prizeAmount > 0) {
-                gameToken.transfer(finalStandings[i], prizeAmount);
-                emit PrizeClaimed(tournamentId, finalStandings[i], prizeAmount);
-            }
-        }
+    function _findThirdPlace(uint256 tournamentId) internal view returns (address) {
+        // Simplified - would need proper semifinal tracking
+        return address(0);
     }
     
     // ============================================================================
-    // SEASONAL TOURNAMENTS
+    // BETTING SYSTEM
     // ============================================================================
     
-    function createSeason(
-        string calldata theme,
-        uint8 elementBonus,
-        uint256 bonusMultiplier,
-        uint32 duration
-    ) external onlyOwner returns (uint256) {
+    function placeBet(uint256 tournamentId, address player, uint256 amount) external nonReentrant {
+        BettingPool storage pool = bettingPools[tournamentId];
+        require(pool.bettingOpen, "Betting closed");
+        require(tournaments[tournamentId].hasRegistered[player], "Player not registered");
+        require(amount > 0, "Invalid bet amount");
+        require(gameToken.balanceOf(msg.sender) >= amount, "Insufficient balance");
+        
+        gameToken.transferFrom(msg.sender, address(this), amount);
+        
+        pool.playerBets[msg.sender][player] += amount;
+        pool.bets[player] += amount;
+        pool.totalPool += amount;
+        
+        emit BetPlaced(tournamentId, msg.sender, player, amount);
+    }
+    
+    // ============================================================================
+    // SEASON MANAGEMENT
+    // ============================================================================
+    
+    function startSeason(uint32 duration) external onlyOwner {
         uint256 seasonId = nextSeasonId++;
+        currentSeasonId = seasonId;
         
-        seasons[seasonId] = SeasonalTournament({
-            seasonId: seasonId,
-            theme: theme,
-            elementBonus: elementBonus,
-            bonusMultiplier: bonusMultiplier,
-            seasonStart: uint32(block.timestamp),
-            seasonEnd: uint32(block.timestamp) + duration,
-            tournamentIds: new uint256[](0),
-            isActive: true
-        });
+        SeasonData storage season = seasons[seasonId];
+        season.seasonId = seasonId;
+        season.startTime = uint32(block.timestamp);
+        season.endTime = uint32(block.timestamp) + duration;
+        season.isActive = true;
         
-        emit SeasonStarted(seasonId, theme, elementBonus);
-        return seasonId;
+        emit SeasonStarted(seasonId, duration);
     }
     
-    function addTournamentToSeason(uint256 seasonId, uint256 tournamentId) external onlyOwner {
-        require(seasons[seasonId].isActive, "Season not active");
-        require(tournaments[tournamentId].id != 0, "Tournament does not exist");
+    function _updateSeasonPoints(uint256 tournamentId, address winner) internal {
+        if (currentSeasonId == 0) return;
         
-        seasons[seasonId].tournamentIds.push(tournamentId);
+        Tournament storage tournament = tournaments[tournamentId];
+        SeasonData storage season = seasons[currentSeasonId];
         
-        // Apply seasonal bonuses
-        tournaments[tournamentId].prizePool = 
-            (tournaments[tournamentId].prizePool * seasons[seasonId].bonusMultiplier) / 100;
+        // Award points based on tournament tier
+        uint256 points = _getTierPoints(tournament.tier);
+        season.playerPoints[winner] += points;
+        season.tournamentWins[winner]++;
+        
+        playerSeasonPoints[winner] += points;
     }
     
-    function endSeason(uint256 seasonId) external onlyOwner {
-        require(seasons[seasonId].isActive, "Season not active");
-        seasons[seasonId].isActive = false;
-        seasons[seasonId].seasonEnd = uint32(block.timestamp);
-    }
-    
-    // ============================================================================
-    // UTILITY FUNCTIONS
-    // ============================================================================
-    
-    function _getRegisteredPlayers(uint256 tournamentId) internal view returns (address[] memory) {
-        // This is simplified - in practice, you'd maintain a list of registered players
-        // For now, return a placeholder array
-        address[] memory players = new address[](tournaments[tournamentId].currentParticipants);
-        // Would populate from actual registrations
-        return players;
-    }
-    
-    function _removeFromUpcoming(uint256 tournamentId) internal {
-        for (uint256 i = 0; i < upcomingTournaments.length; i++) {
-            if (upcomingTournaments[i] == tournamentId) {
-                upcomingTournaments[i] = upcomingTournaments[upcomingTournaments.length - 1];
-                upcomingTournaments.pop();
-                break;
-            }
-        }
-    }
-    
-    function _removeFromActive(uint256 tournamentId) internal {
-        for (uint256 i = 0; i < activeTournaments.length; i++) {
-            if (activeTournaments[i] == tournamentId) {
-                activeTournaments[i] = activeTournaments[activeTournaments.length - 1];
-                activeTournaments.pop();
-                break;
-            }
-        }
+    function _getTierPoints(TournamentTier tier) internal pure returns (uint256) {
+        if (tier == TournamentTier.ROOKIE) return 100;
+        if (tier == TournamentTier.AMATEUR) return 250;
+        if (tier == TournamentTier.PROFESSIONAL) return 500;
+        if (tier == TournamentTier.CHAMPION) return 1000;
+        if (tier == TournamentTier.LEGENDARY) return 2500;
+        return 0;
     }
     
     // ============================================================================
     // VIEW FUNCTIONS
     // ============================================================================
     
-    function getTournament(uint256 tournamentId) external view returns (TournamentConfig memory) {
-        return tournaments[tournamentId];
+    function getTournament(uint256 tournamentId) external view returns (
+        uint256 id,
+        string memory name,
+        TournamentType tournamentType,
+        TournamentStatus status,
+        TournamentTier tier,
+        uint256 entryFee,
+        uint256 prizePool,
+        uint256 maxParticipants,
+        uint256 currentParticipants,
+        uint32 registrationEnd,
+        uint32 tournamentStart
+    ) {
+        Tournament storage tournament = tournaments[tournamentId];
+        return (
+            tournament.id,
+            tournament.name,
+            tournament.tournamentType,
+            tournament.status,
+            tournament.tier,
+            tournament.entryFee,
+            tournament.prizePool,
+            tournament.maxParticipants,
+            tournament.currentParticipants,
+            tournament.registrationEnd,
+            tournament.tournamentStart
+        );
+    }
+    
+    function getTournamentParticipants(uint256 tournamentId) external view returns (uint256[] memory) {
+        return tournaments[tournamentId].participantPets;
     }
     
     function getMatch(uint256 matchId) external view returns (TournamentMatch memory) {
         return matches[matchId];
     }
     
-    function getPlayerRegistration(uint256 tournamentId, address player) external view returns (PlayerRegistration memory) {
-        return registrations[tournamentId][player];
+    function getBracket(uint256 tournamentId) external view returns (
+        uint8 currentRound,
+        uint8 totalRounds,
+        uint256[] memory currentMatches
+    ) {
+        Bracket storage bracket = brackets[tournamentId];
+        return (bracket.currentRound, bracket.totalRounds, bracket.currentMatches);
     }
     
-    function getTournamentMatches(uint256 tournamentId, uint8 round) external view returns (uint256[] memory) {
+    function getRoundMatches(uint256 tournamentId, uint8 round) external view returns (uint256[] memory) {
         return brackets[tournamentId].roundMatches[round];
     }
     
+    function getPlayerTournaments(address player) external view returns (uint256[] memory) {
+        return playerTournaments[player];
+    }
+    
+    function getTierTournaments(TournamentTier tier) external view returns (uint256[] memory) {
+        return tierTournaments[tier];
+    }
+    
+    function getSeasonData(uint256 seasonId) external view returns (
+        uint256 id,
+        uint32 startTime,
+        uint32 endTime,
+        uint256 championshipTournamentId,
+        bool isActive
+    ) {
+        SeasonData storage season = seasons[seasonId];
+        return (season.seasonId, season.startTime, season.endTime, season.championshipTournamentId, season.isActive);
+    }
+    
+    function getPlayerSeasonPoints(uint256 seasonId, address player) external view returns (uint256) {
+        return seasons[seasonId].playerPoints[player];
+    }
+    
+    function getBettingPool(uint256 tournamentId) external view returns (
+        uint256 totalPool,
+        bool bettingOpen,
+        bool resolved
+    ) {
+        BettingPool storage pool = bettingPools[tournamentId];
+        return (pool.totalPool, pool.bettingOpen, pool.resolved);
+    }
+    
+    function getPlayerBets(uint256 tournamentId, address bettor, address player) external view returns (uint256) {
+        return bettingPools[tournamentId].playerBets[bettor][player];
+    }
+    
     function getActiveTournaments() external view returns (uint256[] memory) {
+        uint256 count = 0;
+        
+        // Count active tournaments
+        for (uint256 i = 1; i < nextTournamentId; i++) {
+            if (tournaments[i].status == TournamentStatus.REGISTRATION || tournaments[i].status == TournamentStatus.ACTIVE) {
+                count++;
+            }
+        }
+        
+        uint256[] memory activeTournaments = new uint256[](count);
+        uint256 index = 0;
+        
+        // Fill array with active tournament IDs
+        for (uint256 i = 1; i < nextTournamentId; i++) {
+            if (tournaments[i].status == TournamentStatus.REGISTRATION || tournaments[i].status == TournamentStatus.ACTIVE) {
+                activeTournaments[index] = i;
+                index++;
+            }
+        }
+        
         return activeTournaments;
-    }
-    
-    function getUpcomingTournaments() external view returns (uint256[] memory) {
-        return upcomingTournaments;
-    }
-    
-    function getSeason(uint256 seasonId) external view returns (SeasonalTournament memory season) {
-        SeasonalTournament storage s = seasons[seasonId];
-        return SeasonalTournament({
-            seasonId: s.seasonId,
-            theme: s.theme,
-            elementBonus: s.elementBonus,
-            bonusMultiplier: s.bonusMultiplier,
-            seasonStart: s.seasonStart,
-            seasonEnd: s.seasonEnd,
-            tournamentIds: s.tournamentIds,
-            isActive: s.isActive
-        });
-    }
-    
-    function getTournamentStandings(uint256 tournamentId) external view returns (address[] memory) {
-        return brackets[tournamentId].finalStandings;
-    }
-    
-    function canPlayerRegister(uint256 tournamentId, address player, uint256 petId) external view returns (bool, string memory) {
-        TournamentConfig storage tournament = tournaments[tournamentId];
-        
-        if (tournament.id == 0) return (false, "Tournament does not exist");
-        if (tournament.status != TournamentStatus.REGISTRATION) return (false, "Registration not open");
-        if (block.timestamp > tournament.registrationEnd) return (false, "Registration ended");
-        if (tournament.currentParticipants >= tournament.maxParticipants) return (false, "Tournament full");
-        if (petContract.ownerOf(petId) != player) return (false, "Not pet owner");
-        if (registrations[tournamentId][player].player != address(0)) return (false, "Already registered");
-        
-        PetNFT.Pet memory pet = petContract.getPet(petId);
-        
-        if (tournament.requiredElement < 8 && pet.element != tournament.requiredElement) {
-            return (false, "Wrong element required");
-        }
-        
-        if (pet.rarity < tournament.minRarity || pet.rarity > tournament.maxRarity) {
-            return (false, "Rarity not allowed");
-        }
-        
-        if (pet.level < tournament.minLevel || pet.level > tournament.maxLevel) {
-            return (false, "Level not allowed");
-        }
-        
-        if (pet.hp == 0) return (false, "Pet must have HP");
-        if (pet.energy < 50) return (false, "Pet needs energy");
-        
-        return (true, "Can register");
     }
     
     // ============================================================================
     // ADMIN FUNCTIONS
     // ============================================================================
     
-    function updatePlatformFee(uint256 _feePercentage) external onlyOwner {
-        require(_feePercentage <= 20, "Fee too high");
-        platformFeePercentage = _feePercentage;
+    function setPlatformFee(uint256 newFeePercentage) external onlyOwner {
+        require(newFeePercentage <= 1000, "Fee too high"); // Max 10%
+        platformFeePercentage = newFeePercentage;
     }
     
-    function setTreasuryAddress(address _treasuryAddress) external onlyOwner {
-        require(_treasuryAddress != address(0), "Invalid treasury address");
-        treasuryAddress = _treasuryAddress;
+    function updatePrizeStructure(PrizeStructure calldata newStructure) external onlyOwner {
+        require(
+            newStructure.firstPlace + 
+            newStructure.secondPlace + 
+            newStructure.thirdPlace + 
+            newStructure.participationBonus + 
+            newStructure.organizerFee + 
+            newStructure.platformFee == 10000,
+            "Prize structure must sum to 100%"
+        );
+        defaultPrizeStructure = newStructure;
     }
     
-    function setTournamentLimits(uint256 _minSize, uint256 _maxSize) external onlyOwner {
-        require(_minSize < _maxSize && _minSize >= 2, "Invalid tournament size limits");
-        minTournamentSize = _minSize;
-        maxTournamentSize = _maxSize;
+    function setTierRequirements(
+        TournamentTier tier,
+        uint256 minLevel,
+        uint256 maxLevel,
+        uint256 entryFee
+    ) external onlyOwner {
+        require(minLevel <= maxLevel, "Invalid level range");
+        tierMinLevel[tier] = minLevel;
+        tierMaxLevel[tier] = maxLevel;
+        tierEntryFee[tier] = entryFee;
     }
     
-    function addPrizeTemplate(string calldata templateName, uint256[] calldata distribution) external onlyOwner {
-        require(distribution.length > 0, "Empty distribution");
-        
-        uint256 totalPercentage = 0;
-        for (uint256 i = 0; i < distribution.length; i++) {
-            totalPercentage += distribution[i];
-        }
-        require(totalPercentage <= 10000, "Distribution exceeds 100%");
-        
-        prizeTemplates[templateName] = distribution;
-    }
-    
-    function cancelTournament(uint256 tournamentId, string calldata reason) external onlyOwner {
-        TournamentConfig storage tournament = tournaments[tournamentId];
-        require(tournament.status == TournamentStatus.REGISTRATION || tournament.status == TournamentStatus.READY, "Cannot cancel");
+    function cancelTournament(uint256 tournamentId) external onlyOwner {
+        Tournament storage tournament = tournaments[tournamentId];
+        require(tournament.status != TournamentStatus.COMPLETED, "Cannot cancel completed tournament");
         
         tournament.status = TournamentStatus.CANCELLED;
         
-        // Refund all entry fees
-        // Simplified - would iterate through all registrations
-        if (tournament.prizePool > 0) {
-            gameToken.transfer(treasuryAddress, tournament.prizePool);
+        // Refund entry fees
+        for (uint256 i = 0; i < tournament.participantPets.length; i++) {
+            address player = petContract.ownerOf(tournament.participantPets[i]);
+            gameToken.transfer(player, tournament.entryFee);
         }
-        
-        _removeFromUpcoming(tournamentId);
-        _removeFromActive(tournamentId);
     }
     
-    function emergencyPause() external onlyOwner {
+    function resolveDisputedMatch(uint256 matchId, uint256 winnerPet) external onlyOwner {
+        TournamentMatch storage match = matches[matchId];
+        require(match.status == MatchStatus.DISPUTED, "Match not disputed");
+        
+        if (winnerPet == match.pet1) {
+            match.winner = match.pet1;
+            match.winnerAddress = match.player1;
+        } else if (winnerPet == match.pet2) {
+            match.winner = match.pet2;
+            match.winnerAddress = match.player2;
+        } else {
+            revert("Invalid winner pet");
+        }
+        
+        match.status = MatchStatus.COMPLETED;
+        _advanceWinner(match.tournamentId, matchId, match.winner, match.winnerAddress);
+        
+        emit MatchCompleted(matchId, match.winner, match.winnerAddress);
+    }
+    
+    function endSeason() external onlyOwner {
+        require(currentSeasonId > 0, "No active season");
+        seasons[currentSeasonId].isActive = false;
+        
+        // Create championship tournament for top players
+        _createChampionshipTournament(currentSeasonId);
+        
+        currentSeasonId = 0;
+    }
+    
+    function _createChampionshipTournament(uint256 seasonId) internal {
+        // Simplified implementation - would need proper leaderboard tracking
+        uint256 championshipId = createTournament(
+            "Season Championship",
+            "Championship tournament for season winners",
+            TournamentType.SINGLE_ELIMINATION,
+            TournamentTier.LEGENDARY,
+            16, // Top 16 players
+            604800, // 1 week registration
+            1209600, // 2 weeks duration
+            255, // No rarity requirement
+            255, // No element requirement
+            true // Is seasonal championship
+        );
+        
+        seasons[seasonId].championshipTournamentId = championshipId;
+    }
+    
+    function pause() external onlyOwner {
         _pause();
     }
     
-    function emergencyUnpause() external onlyOwner {
+    function unpause() external onlyOwner {
         _unpause();
     }
     
     function emergencyWithdraw() external onlyOwner {
         gameToken.transfer(owner(), gameToken.balanceOf(address(this)));
-    }
-    
-    function forceCompleteMatch(uint256 matchId, address winner) external onlyOwner {
-        TournamentMatch storage match = matches[matchId];
-        require(match.status == MatchStatus.PENDING || match.status == MatchStatus.IN_PROGRESS, "Match not active");
-        require(winner == match.player1 || winner == match.player2, "Invalid winner");
-        
-        match.winner = winner;
-        match.winnerPet = winner == match.player1 ? match.pet1 : match.pet2;
-        match.status = MatchStatus.COMPLETED;
-        match.completedTime = uint32(block.timestamp);
-        
-        // Update player stats
-        if (winner == match.player1) {
-            registrations[match.tournamentId][match.player1].wins++;
-            registrations[match.tournamentId][match.player2].losses++;
-        } else {
-            registrations[match.tournamentId][match.player2].wins++;
-            registrations[match.tournamentId][match.player1].losses++;
-        }
-        
-        emit MatchCompleted(matchId, winner, match.result);
-        _checkRoundCompletion(match.tournamentId, match.round);
     }
 }
