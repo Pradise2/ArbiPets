@@ -9,41 +9,37 @@ import "./GameToken.sol";
 
 /**
  * @title PetDAO
- * @dev Decentralized governance system for the CryptoPets ecosystem
+ * @dev Decentralized governance system for CryptoPets community
  * @notice Features:
  * - Proposal creation and voting system
- * - Multi-tier voting power (PETS tokens + NFT ownership + staking)
- * - Timelock execution for critical changes
- * - Delegation system for voting power
+ * - Tiered voting power based on pet ownership and staking
  * - Treasury management and fund allocation
- * - Emergency proposals for critical issues
+ * - Multi-stage proposal lifecycle
+ * - Quorum and approval thresholds
  */
 contract PetDAO is Ownable, ReentrancyGuard, Pausable {
     
-    // Proposal types
     enum ProposalType { 
-        PARAMETER_CHANGE,    // Game parameter adjustments
-        TREASURY_ALLOCATION, // Fund allocation proposals
-        CONTRACT_UPGRADE,    // Smart contract upgrades
-        FEATURE_ADDITION,    // New feature implementations
-        EMERGENCY,           // Emergency interventions
-        COMMUNITY_GRANT,     // Community funding proposals
-        PARTNERSHIP,         // Strategic partnerships
-        TOKEN_ECONOMICS      // Tokenomics changes
+        GAME_PARAMETER,     // Modify game mechanics (breeding costs, battle rewards, etc.)
+        TREASURY_SPEND,     // Allocate treasury funds
+        NEW_FEATURE,        // Add new game features
+        PARTNERSHIP,        // Strategic partnerships
+        EMERGENCY_ACTION,   // Emergency interventions
+        CONSTITUTION        // Change DAO rules
     }
     
-    enum ProposalStatus { 
-        PENDING,    // Proposal created, voting not started
-        ACTIVE,     // Currently being voted on
-        SUCCEEDED,  // Passed vote, ready for execution
-        EXECUTED,   // Successfully executed
-        DEFEATED,   // Failed to pass
-        CANCELLED,  // Cancelled by proposer or admin
-        EXPIRED,    // Voting period expired
-        QUEUED      // Waiting in timelock
+    enum ProposalStatus {
+        PENDING,           // Waiting for voting period to start
+        ACTIVE,            // Currently accepting votes
+        SUCCEEDED,         // Passed all requirements
+        DEFEATED,          // Failed to meet requirements
+        QUEUED,            // Waiting for execution delay
+        EXECUTED,          // Successfully executed
+        CANCELLED,         // Cancelled by proposer or admin
+        EXPIRED            // Expired without execution
     }
     
-    enum VoteType { AGAINST, FOR, ABSTAIN }
+    enum VoteChoice { AGAINST, FOR, ABSTAIN }
     
     struct Proposal {
         uint256 id;
@@ -52,217 +48,220 @@ contract PetDAO is Ownable, ReentrancyGuard, Pausable {
         ProposalStatus status;
         string title;
         string description;
-        string[] targets;           // Contract addresses to call
-        bytes[] calldatas;          // Function calls to execute
-        uint256[] values;           // ETH values to send
+        string[] actions;           // Encoded function calls
+        uint256 startBlock;
+        uint256 endBlock;
+        uint256 executionDelay;     // Delay before execution (timelock)
+        uint256 executionDeadline;  // Deadline for execution
         uint256 forVotes;
         uint256 againstVotes;
         uint256 abstainVotes;
-        uint256 totalVotes;
-        uint32 startBlock;
-        uint32 endBlock;
-        uint32 createdAt;
-        uint32 executionDelay;      // Timelock delay in seconds
-        uint32 earliestExecution;   // Earliest execution time
+        uint256 totalVotingPower;
+        uint256 quorumRequired;
+        uint256 approvalThreshold;  // Percentage needed to pass (basis points)
         bool executed;
-        mapping(address => Receipt) receipts; // Voting receipts
+        mapping(address => Vote) votes;
     }
     
-    struct Receipt {
+    struct Vote {
         bool hasVoted;
-        VoteType support;
-        uint256 votes;
+        VoteChoice choice;
+        uint256 votingPower;
+        uint256 timestamp;
         string reason;
     }
     
-    struct Delegation {
-        address delegate;
-        uint256 delegatedVotes;
-        uint32 delegatedAt;
+    struct VoterProfile {
+        uint256 totalVotingPower;
+        uint256 delegatedPower;
+        uint256 proposalsCreated;
+        uint256 votesParticipated;
+        address delegate;           // Address to delegate voting power to
+        uint256 lastActiveBlock;
     }
     
     struct TreasuryAllocation {
-        uint256 proposalId;
-        address recipient;
         uint256 amount;
+        address recipient;
         string purpose;
         bool executed;
-        uint32 scheduledFor;
-    }
-    
-    struct VotingPowerSnapshot {
-        uint256 tokenBalance;
-        uint256 nftBalance;
-        uint256 stakingPower;
-        uint256 delegatedPower;
-        uint256 totalPower;
-        uint32 blockNumber;
+        uint256 executionBlock;
     }
     
     // Contract references
     PetNFT public petContract;
     GameToken public gameToken;
     
-    // Governance parameters
-    uint256 public proposalThreshold = 100000 * 10**18; // 100K PETS to create proposal
-    uint256 public quorumVotes = 500000 * 10**18;      // 500K votes needed for quorum
-    uint256 public votingPeriod = 17280;                // ~3 days in blocks (15s blocks)
-    uint256 public votingDelay = 1;                     // Blocks before voting starts
-    uint256 public timelockDelay = 172800;              // 48 hours for execution delay
-    uint256 public emergencyTimelockDelay = 3600;      // 1 hour for emergency proposals
-    
-    // Voting power multipliers
-    uint256 public tokenVotingPower = 1;                // 1 vote per PETS token
-    uint256 public nftVotingPower = 1000 * 10**18;     // 1000 votes per NFT
-    uint256 public stakingMultiplier = 150;             // 150% voting power for stakers
-    uint256 public rarityMultiplier = 200;              // 200% multiplier for rare NFTs
-    
-    // Proposal storage
+    // Governance storage
     mapping(uint256 => Proposal) public proposals;
-    mapping(address => Delegation) public delegations;
-    mapping(address => uint256) public delegatedVoteCounts;
+    mapping(address => VoterProfile) public voterProfiles;
+    mapping(address => mapping(uint256 => bool)) public hasVotedOnProposal;
     mapping(uint256 => TreasuryAllocation) public treasuryAllocations;
-    mapping(address => VotingPowerSnapshot[]) public votingPowerHistory;
     
-    // Proposal counters and tracking
+    // Delegation tracking
+    mapping(address => address[]) public delegators; // delegate => delegators[]
+    mapping(address => uint256) public delegatedVotingPower;
+    
+    // Configuration
     uint256 public nextProposalId = 1;
-    uint256[] public activeProposals;
-    uint256[] public executedProposals;
+    uint256 public nextAllocationId = 1;
+    
+    // Voting parameters
+    uint256 public proposalThreshold = 100000 * 10**18; // 100k PETS to create proposal
+    uint256 public votingDelay = 17280; // ~3 days in blocks (assuming 15s blocks)
+    uint256 public votingPeriod = 46080; // ~8 days in blocks
+    uint256 public executionDelay = 17280; // ~3 days delay before execution
+    uint256 public executionWindow = 86400; // ~15 days window for execution
+    
+    // Quorum and approval thresholds by proposal type (basis points: 10000 = 100%)
+    mapping(ProposalType => uint256) public quorumThresholds;
+    mapping(ProposalType => uint256) public approvalThresholds;
+    
+    // Voting power calculation weights
+    uint256 public constant TOKEN_VOTING_WEIGHT = 1;      // 1 vote per PETS token
+    uint256 public constant PET_VOTING_WEIGHT = 1000;     // 1000 votes per pet
+    uint256 public constant RARITY_MULTIPLIER_BASE = 1000; // Base for rarity calculations
     
     // Treasury management
-    uint256 public treasuryBalance;
-    address public treasuryMultisig;
-    mapping(address => bool) public emergencyExecutors;
-    
-    // Proposal categories and limits
-    mapping(ProposalType => uint256) public proposalCooldowns;
-    mapping(ProposalType => uint256) public lastProposalTime;
-    mapping(address => mapping(ProposalType => uint32)) public userProposalCounts;
+    address public treasuryAddress;
+    uint256 public totalTreasuryAllocated;
     
     // Events
     event ProposalCreated(uint256 indexed proposalId, address indexed proposer, ProposalType proposalType, string title);
-    event VoteCast(address indexed voter, uint256 indexed proposalId, VoteType support, uint256 votes, string reason);
-    event ProposalExecuted(uint256 indexed proposalId, bool success);
-    event ProposalQueued(uint256 indexed proposalId, uint32 executionTime);
-    event ProposalCancelled(uint256 indexed proposalId);
-    event VotingPowerDelegated(address indexed delegator, address indexed delegate, uint256 votes);
-    event TreasuryAllocationScheduled(uint256 indexed proposalId, address recipient, uint256 amount);
-    event EmergencyExecutorAdded(address indexed executor);
-    event GovernanceParametersUpdated(uint256 proposalThreshold, uint256 quorumVotes, uint256 votingPeriod);
+    event VoteCast(uint256 indexed proposalId, address indexed voter, VoteChoice choice, uint256 votingPower, string reason);
+    event ProposalExecuted(uint256 indexed proposalId, address indexed executor);
+    event ProposalCancelled(uint256 indexed proposalId, address indexed canceller);
+    event VotingPowerDelegated(address indexed delegator, address indexed delegate, uint256 power);
+    event TreasuryAllocationExecuted(uint256 indexed allocationId, address recipient, uint256 amount);
     
     constructor(
         address _petContract,
         address _gameToken,
-        address _treasuryMultisig
+        address _treasuryAddress
     ) {
         petContract = PetNFT(_petContract);
         gameToken = GameToken(_gameToken);
-        treasuryMultisig = _treasuryMultisig;
+        treasuryAddress = _treasuryAddress;
         
-        // Initialize proposal cooldowns
-        proposalCooldowns[ProposalType.PARAMETER_CHANGE] = 86400;      // 1 day
-        proposalCooldowns[ProposalType.TREASURY_ALLOCATION] = 604800;  // 7 days
-        proposalCooldowns[ProposalType.CONTRACT_UPGRADE] = 1209600;    // 14 days
-        proposalCooldowns[ProposalType.TOKEN_ECONOMICS] = 2592000;     // 30 days
-        
-        // Add owner as emergency executor
-        emergencyExecutors[owner()] = true;
+        _initializeGovernanceParameters();
     }
     
-    modifier onlyEmergencyExecutor() {
-        require(emergencyExecutors[msg.sender], "Not authorized for emergency execution");
-        _;
+    function _initializeGovernanceParameters() internal {
+        // Set quorum thresholds (percentage of total voting power)
+        quorumThresholds[ProposalType.GAME_PARAMETER] = 500;    // 5%
+        quorumThresholds[ProposalType.TREASURY_SPEND] = 1000;   // 10%
+        quorumThresholds[ProposalType.NEW_FEATURE] = 750;       // 7.5%
+        quorumThresholds[ProposalType.PARTNERSHIP] = 1500;      // 15%
+        quorumThresholds[ProposalType.EMERGENCY_ACTION] = 2000; // 20%
+        quorumThresholds[ProposalType.CONSTITUTION] = 2500;     // 25%
+        
+        // Set approval thresholds (percentage of votes cast)
+        approvalThresholds[ProposalType.GAME_PARAMETER] = 6000;    // 60%
+        approvalThresholds[ProposalType.TREASURY_SPEND] = 6500;    // 65%
+        approvalThresholds[ProposalType.NEW_FEATURE] = 5500;       // 55%
+        approvalThresholds[ProposalType.PARTNERSHIP] = 7000;       // 70%
+        approvalThresholds[ProposalType.EMERGENCY_ACTION] = 7500;  // 75%
+        approvalThresholds[ProposalType.CONSTITUTION] = 8000;      // 80%
+    }
+    
+    // ============================================================================
+    // VOTING POWER CALCULATION
+    // ============================================================================
+    
+    function calculateVotingPower(address voter) public view returns (uint256) {
+        uint256 totalPower = 0;
+        
+        // Token-based voting power
+        uint256 tokenBalance = gameToken.balanceOf(voter);
+        totalPower += tokenBalance * TOKEN_VOTING_WEIGHT / 10**18;
+        
+        // Pet-based voting power
+        uint256 petCount = petContract.balanceOf(voter);
+        
+        for (uint256 i = 0; i < petCount; i++) {
+            uint256 petId = petContract.tokenOfOwnerByIndex(voter, i);
+            PetNFT.Pet memory pet = petContract.getPet(petId);
+            
+            // Base pet voting power
+            uint256 petPower = PET_VOTING_WEIGHT;
+            
+            // Rarity multiplier
+            uint256[] memory rarityMultipliers = new uint256[](4);
+            rarityMultipliers[0] = 1000;  // Common: 1x
+            rarityMultipliers[1] = 1500;  // Rare: 1.5x
+            rarityMultipliers[2] = 2000;  // Epic: 2x
+            rarityMultipliers[3] = 3000;  // Legendary: 3x
+            
+            petPower = (petPower * rarityMultipliers[pet.rarity]) / RARITY_MULTIPLIER_BASE;
+            
+            // Level bonus (1% per level)
+            petPower += (petPower * pet.level) / 100;
+            
+            // Genesis pet bonus (50% extra)
+            if (pet.isGenesis) {
+                petPower += petPower / 2;
+            }
+            
+            totalPower += petPower;
+        }
+        
+        // Add delegated power
+        totalPower += delegatedVotingPower[voter];
+        
+        return totalPower;
+    }
+    
+    function getTotalVotingPower() public view returns (uint256) {
+        uint256 totalSupply = gameToken.totalSupply();
+        uint256 totalPets = petContract.totalSupply();
+        
+        // Simplified calculation - in practice, would need more sophisticated tracking
+        return (totalSupply * TOKEN_VOTING_WEIGHT / 10**18) + (totalPets * PET_VOTING_WEIGHT);
     }
     
     // ============================================================================
     // PROPOSAL CREATION
     // ============================================================================
     
-    function propose(
+    function createProposal(
         ProposalType proposalType,
         string calldata title,
         string calldata description,
-        string[] calldata targets,
-        bytes[] calldata calldatas,
-        uint256[] calldata values
+        string[] calldata actions
     ) external nonReentrant whenNotPaused returns (uint256) {
-        require(getVotingPower(msg.sender) >= proposalThreshold, "Insufficient voting power to propose");
-        require(bytes(title).length > 0, "Title cannot be empty");
-        require(bytes(description).length > 0, "Description cannot be empty");
-        require(targets.length == calldatas.length && targets.length == values.length, "Array length mismatch");
-        require(targets.length > 0, "Must have at least one action");
         
-        // Check proposal cooldowns
-        if (proposalCooldowns[proposalType] > 0) {
-            require(
-                block.timestamp >= lastProposalTime[proposalType] + proposalCooldowns[proposalType],
-                "Proposal type on cooldown"
-            );
-        }
+        uint256 voterPower = calculateVotingPower(msg.sender);
+        require(voterPower >= proposalThreshold, "Insufficient voting power to create proposal");
         
-        // Check user proposal limits (prevent spam)
-        require(userProposalCounts[msg.sender][proposalType] < 5, "Too many proposals of this type");
+        require(bytes(title).length > 0 && bytes(title).length <= 200, "Invalid title length");
+        require(bytes(description).length > 0 && bytes(description).length <= 5000, "Invalid description length");
+        require(actions.length > 0 && actions.length <= 10, "Invalid actions count");
         
         uint256 proposalId = nextProposalId++;
-        uint32 startBlock = uint32(block.number) + uint32(votingDelay);
-        uint32 endBlock = startBlock + uint32(votingPeriod);
+        uint256 startBlock = block.number + votingDelay;
+        uint256 endBlock = startBlock + votingPeriod;
         
-        // Determine execution delay based on proposal type
-        uint32 executionDelay = proposalType == ProposalType.EMERGENCY ? 
-            uint32(emergencyTimelockDelay) : uint32(timelockDelay);
+        Proposal storage proposal = proposals[proposalId];
+        proposal.id = proposalId;
+        proposal.proposer = msg.sender;
+        proposal.proposalType = proposalType;
+        proposal.status = ProposalStatus.PENDING;
+        proposal.title = title;
+        proposal.description = description;
+        proposal.actions = actions;
+        proposal.startBlock = startBlock;
+        proposal.endBlock = endBlock;
+        proposal.executionDelay = executionDelay;
+        proposal.executionDeadline = endBlock + executionDelay + executionWindow;
+        proposal.totalVotingPower = getTotalVotingPower();
+        proposal.quorumRequired = (proposal.totalVotingPower * quorumThresholds[proposalType]) / 10000;
+        proposal.approvalThreshold = approvalThresholds[proposalType];
         
-        // Create proposal storage (mappings initialized separately)
-        proposals[proposalId].id = proposalId;
-        proposals[proposalId].proposer = msg.sender;
-        proposals[proposalId].proposalType = proposalType;
-        proposals[proposalId].status = ProposalStatus.PENDING;
-        proposals[proposalId].title = title;
-        proposals[proposalId].description = description;
-        proposals[proposalId].targets = targets;
-        proposals[proposalId].calldatas = calldatas;
-        proposals[proposalId].values = values;
-        proposals[proposalId].startBlock = startBlock;
-        proposals[proposalId].endBlock = endBlock;
-        proposals[proposalId].createdAt = uint32(block.timestamp);
-        proposals[proposalId].executionDelay = executionDelay;
-        
-        // Update tracking
-        activeProposals.push(proposalId);
-        lastProposalTime[proposalType] = block.timestamp;
-        userProposalCounts[msg.sender][proposalType]++;
+        // Update voter profile
+        voterProfiles[msg.sender].proposalsCreated++;
+        voterProfiles[msg.sender].lastActiveBlock = block.number;
         
         emit ProposalCreated(proposalId, msg.sender, proposalType, title);
-        return proposalId;
-    }
-    
-    function createEmergencyProposal(
-        string calldata title,
-        string calldata description,
-        string[] calldata targets,
-        bytes[] calldata calldatas,
-        uint256[] calldata values
-    ) external onlyEmergencyExecutor returns (uint256) {
-        uint256 proposalId = nextProposalId++;
-        uint32 startBlock = uint32(block.number) + 1; // Immediate voting
-        uint32 endBlock = startBlock + uint32(votingPeriod / 3); // Shorter voting period
-        
-        proposals[proposalId].id = proposalId;
-        proposals[proposalId].proposer = msg.sender;
-        proposals[proposalId].proposalType = ProposalType.EMERGENCY;
-        proposals[proposalId].status = ProposalStatus.ACTIVE;
-        proposals[proposalId].title = title;
-        proposals[proposalId].description = description;
-        proposals[proposalId].targets = targets;
-        proposals[proposalId].calldatas = calldatas;
-        proposals[proposalId].values = values;
-        proposals[proposalId].startBlock = startBlock;
-        proposals[proposalId].endBlock = endBlock;
-        proposals[proposalId].createdAt = uint32(block.timestamp);
-        proposals[proposalId].executionDelay = uint32(emergencyTimelockDelay);
-        
-        activeProposals.push(proposalId);
-        
-        emit ProposalCreated(proposalId, msg.sender, ProposalType.EMERGENCY, title);
         return proposalId;
     }
     
@@ -270,332 +269,227 @@ contract PetDAO is Ownable, ReentrancyGuard, Pausable {
     // VOTING SYSTEM
     // ============================================================================
     
-    function castVote(uint256 proposalId, VoteType support) external nonReentrant {
-        _castVote(msg.sender, proposalId, support, "");
-    }
-    
-    function castVoteWithReason(uint256 proposalId, VoteType support, string calldata reason) external nonReentrant {
-        _castVote(msg.sender, proposalId, support, reason);
-    }
-    
-    function _castVote(address voter, uint256 proposalId, VoteType support, string memory reason) internal {
-        require(state(proposalId) == ProposalStatus.ACTIVE, "Proposal not active");
-        require(!proposals[proposalId].receipts[voter].hasVoted, "Already voted");
+    function castVote(
+        uint256 proposalId,
+        VoteChoice choice,
+        string calldata reason
+    ) external nonReentrant whenNotPaused {
         
-        uint256 votes = getVotingPowerAt(voter, proposals[proposalId].startBlock);
-        require(votes > 0, "No voting power");
+        Proposal storage proposal = proposals[proposalId];
+        require(proposal.id == proposalId, "Proposal does not exist");
+        require(block.number >= proposal.startBlock, "Voting has not started");
+        require(block.number <= proposal.endBlock, "Voting has ended");
+        require(!proposal.votes[msg.sender].hasVoted, "Already voted on this proposal");
         
-        // Record the vote
-        proposals[proposalId].receipts[voter] = Receipt({
+        uint256 votingPower = calculateVotingPower(msg.sender);
+        require(votingPower > 0, "No voting power");
+        
+        // Update proposal status if needed
+        if (proposal.status == ProposalStatus.PENDING) {
+            proposal.status = ProposalStatus.ACTIVE;
+        }
+        
+        // Record vote
+        proposal.votes[msg.sender] = Vote({
             hasVoted: true,
-            support: support,
-            votes: votes,
+            choice: choice,
+            votingPower: votingPower,
+            timestamp: block.timestamp,
             reason: reason
         });
         
         // Update vote tallies
-        if (support == VoteType.FOR) {
-            proposals[proposalId].forVotes += votes;
-        } else if (support == VoteType.AGAINST) {
-            proposals[proposalId].againstVotes += votes;
+        if (choice == VoteChoice.FOR) {
+            proposal.forVotes += votingPower;
+        } else if (choice == VoteChoice.AGAINST) {
+            proposal.againstVotes += votingPower;
         } else {
-            proposals[proposalId].abstainVotes += votes;
+            proposal.abstainVotes += votingPower;
         }
         
-        proposals[proposalId].totalVotes += votes;
+        // Update voter profile
+        voterProfiles[msg.sender].votesParticipated++;
+        voterProfiles[msg.sender].lastActiveBlock = block.number;
         
-        emit VoteCast(voter, proposalId, support, votes, reason);
+        emit VoteCast(proposalId, msg.sender, choice, votingPower, reason);
     }
     
-    function castVoteBySig(
-        uint256 proposalId,
-        VoteType support,
-        address voter,
-        uint8 v,
-        bytes32 r,
-        bytes32 s
-    ) external {
-        bytes32 domainSeparator = keccak256(
-            abi.encode(
-                keccak256("EIP712Domain(string name,uint256 chainId,address verifyingContract)"),
-                keccak256(bytes("CryptoPets DAO")),
-                block.chainid,
-                address(this)
-            )
-        );
+    function castVoteBatch(
+        uint256[] calldata proposalIds,
+        VoteChoice[] calldata choices,
+        string[] calldata reasons
+    ) external nonReentrant whenNotPaused {
+        require(proposalIds.length == choices.length, "Array length mismatch");
+        require(proposalIds.length == reasons.length, "Array length mismatch");
+        require(proposalIds.length <= 10, "Too many proposals");
         
-        bytes32 structHash = keccak256(
-            abi.encode(
-                keccak256("Ballot(uint256 proposalId,uint8 support,address voter)"),
-                proposalId,
-                uint8(support),
-                voter
-            )
-        );
+        for (uint256 i = 0; i < proposalIds.length; i++) {
+            _castVoteInternal(proposalIds[i], choices[i], reasons[i]);
+        }
+    }
+    
+    function _castVoteInternal(uint256 proposalId, VoteChoice choice, string memory reason) internal {
+        Proposal storage proposal = proposals[proposalId];
+        require(proposal.id == proposalId, "Proposal does not exist");
+        require(block.number >= proposal.startBlock, "Voting has not started");
+        require(block.number <= proposal.endBlock, "Voting has ended");
+        require(!proposal.votes[msg.sender].hasVoted, "Already voted on this proposal");
         
-        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", domainSeparator, structHash));
-        address signatory = ecrecover(digest, v, r, s);
-        require(signatory == voter, "Invalid signature");
+        uint256 votingPower = calculateVotingPower(msg.sender);
+        require(votingPower > 0, "No voting power");
         
-        _castVote(voter, proposalId, support, "");
+        if (proposal.status == ProposalStatus.PENDING) {
+            proposal.status = ProposalStatus.ACTIVE;
+        }
+        
+        proposal.votes[msg.sender] = Vote({
+            hasVoted: true,
+            choice: choice,
+            votingPower: votingPower,
+            timestamp: block.timestamp,
+            reason: reason
+        });
+        
+        if (choice == VoteChoice.FOR) {
+            proposal.forVotes += votingPower;
+        } else if (choice == VoteChoice.AGAINST) {
+            proposal.againstVotes += votingPower;
+        } else {
+            proposal.abstainVotes += votingPower;
+        }
+        
+        voterProfiles[msg.sender].votesParticipated++;
+        voterProfiles[msg.sender].lastActiveBlock = block.number;
+        
+        emit VoteCast(proposalId, msg.sender, choice, votingPower, reason);
+    }
+    
+    // ============================================================================
+    // VOTE DELEGATION
+    // ============================================================================
+    
+    function delegate(address delegate) external {
+        require(delegate != msg.sender, "Cannot delegate to yourself");
+        require(delegate != address(0), "Cannot delegate to zero address");
+        
+        address currentDelegate = voterProfiles[msg.sender].delegate;
+        uint256 votingPower = calculateVotingPower(msg.sender);
+        
+        // Remove from current delegate
+        if (currentDelegate != address(0)) {
+            delegatedVotingPower[currentDelegate] -= voterProfiles[msg.sender].delegatedPower;
+            _removeDelegator(currentDelegate, msg.sender);
+        }
+        
+        // Add to new delegate
+        voterProfiles[msg.sender].delegate = delegate;
+        voterProfiles[msg.sender].delegatedPower = votingPower;
+        delegatedVotingPower[delegate] += votingPower;
+        delegators[delegate].push(msg.sender);
+        
+        emit VotingPowerDelegated(msg.sender, delegate, votingPower);
+    }
+    
+    function undelegate() external {
+        address currentDelegate = voterProfiles[msg.sender].delegate;
+        require(currentDelegate != address(0), "Not currently delegating");
+        
+        uint256 delegatedPower = voterProfiles[msg.sender].delegatedPower;
+        
+        // Remove delegation
+        delegatedVotingPower[currentDelegate] -= delegatedPower;
+        _removeDelegator(currentDelegate, msg.sender);
+        
+        voterProfiles[msg.sender].delegate = address(0);
+        voterProfiles[msg.sender].delegatedPower = 0;
+        
+        emit VotingPowerDelegated(msg.sender, address(0), delegatedPower);
+    }
+    
+    function _removeDelegator(address delegate, address delegator) internal {
+        address[] storage dels = delegators[delegate];
+        for (uint256 i = 0; i < dels.length; i++) {
+            if (dels[i] == delegator) {
+                dels[i] = dels[dels.length - 1];
+                dels.pop();
+                break;
+            }
+        }
     }
     
     // ============================================================================
     // PROPOSAL EXECUTION
     // ============================================================================
     
-    function queue(uint256 proposalId) external {
-        require(state(proposalId) == ProposalStatus.SUCCEEDED, "Proposal not succeeded");
-        
-        uint32 executionTime = uint32(block.timestamp) + proposals[proposalId].executionDelay;
-        proposals[proposalId].earliestExecution = executionTime;
-        proposals[proposalId].status = ProposalStatus.QUEUED;
-        
-        emit ProposalQueued(proposalId, executionTime);
-    }
-    
-    function execute(uint256 proposalId) external nonReentrant {
-        require(state(proposalId) == ProposalStatus.QUEUED, "Proposal not queued");
-        require(block.timestamp >= proposals[proposalId].earliestExecution, "Timelock not expired");
-        
-        proposals[proposalId].status = ProposalStatus.EXECUTED;
-        proposals[proposalId].executed = true;
-        
-        // Execute all actions in the proposal
-        bool success = true;
-        for (uint256 i = 0; i < proposals[proposalId].targets.length; i++) {
-            (bool actionSuccess,) = _executeAction(
-                proposals[proposalId].targets[i],
-                proposals[proposalId].values[i],
-                proposals[proposalId].calldatas[i]
-            );
-            success = success && actionSuccess;
-        }
-        
-        // Handle treasury allocations
-        if (proposals[proposalId].proposalType == ProposalType.TREASURY_ALLOCATION) {
-            _processTreasuryAllocation(proposalId);
-        }
-        
-        // Remove from active proposals
-        _removeFromActiveProposals(proposalId);
-        executedProposals.push(proposalId);
-        
-        emit ProposalExecuted(proposalId, success);
-    }
-    
-    function _executeAction(string memory target, uint256 value, bytes memory data) internal returns (bool, bytes memory) {
-        address targetAddress = _parseAddress(target);
-        return targetAddress.call{value: value}(data);
-    }
-    
-    function _parseAddress(string memory addressStr) internal pure returns (address) {
-        bytes memory addressBytes = bytes(addressStr);
-        require(addressBytes.length == 42, "Invalid address format");
-        
-        uint160 result = 0;
-        for (uint i = 2; i < 42; i++) {
-            result *= 16;
-            uint8 b = uint8(addressBytes[i]);
-            if (b >= 48 && b <= 57) {
-                result += b - 48;
-            } else if (b >= 65 && b <= 70) {
-                result += b - 55;
-            } else if (b >= 97 && b <= 102) {
-                result += b - 87;
-            }
-        }
-        return address(result);
-    }
-    
-    function _processTreasuryAllocation(uint256 proposalId) internal {
-        // This would extract allocation details from proposal data
-        // Simplified implementation
-        treasuryAllocations[proposalId] = TreasuryAllocation({
-            proposalId: proposalId,
-            recipient: address(0), // Would be extracted from proposal
-            amount: 0,             // Would be extracted from proposal
-            purpose: "",           // Would be extracted from proposal
-            executed: false,
-            scheduledFor: uint32(block.timestamp)
-        });
-        
-        emit TreasuryAllocationScheduled(proposalId, address(0), 0);
-    }
-    
-    // ============================================================================
-    // DELEGATION SYSTEM
-    // ============================================================================
-    
-    function delegate(address delegatee) external {
-        _delegate(msg.sender, delegatee);
-    }
-    
-    function delegateBySig(
-        address delegatee,
-        address delegator,
-        uint256 nonce,
-        uint256 expiry,
-        uint8 v,
-        bytes32 r,
-        bytes32 s
-    ) external {
-        require(block.timestamp <= expiry, "Signature expired");
-        
-        bytes32 domainSeparator = keccak256(
-            abi.encode(
-                keccak256("EIP712Domain(string name,uint256 chainId,address verifyingContract)"),
-                keccak256(bytes("CryptoPets DAO")),
-                block.chainid,
-                address(this)
-            )
-        );
-        
-        bytes32 structHash = keccak256(
-            abi.encode(
-                keccak256("Delegation(address delegatee,address delegator,uint256 nonce,uint256 expiry)"),
-                delegatee,
-                delegator,
-                nonce,
-                expiry
-            )
-        );
-        
-        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", domainSeparator, structHash));
-        address signatory = ecrecover(digest, v, r, s);
-        require(signatory == delegator, "Invalid signature");
-        
-        _delegate(delegator, delegatee);
-    }
-    
-    function _delegate(address delegator, address delegatee) internal {
-        address currentDelegate = delegations[delegator].delegate;
-        uint256 delegatorBalance = getVotingPower(delegator);
-        
-        // Remove votes from current delegate
-        if (currentDelegate != address(0)) {
-            delegatedVoteCounts[currentDelegate] -= delegations[delegator].delegatedVotes;
-        }
-        
-        // Set new delegation
-        delegations[delegator] = Delegation({
-            delegate: delegatee,
-            delegatedVotes: delegatorBalance,
-            delegatedAt: uint32(block.timestamp)
-        });
-        
-        // Add votes to new delegate
-        if (delegatee != address(0)) {
-            delegatedVoteCounts[delegatee] += delegatorBalance;
-        }
-        
-        emit VotingPowerDelegated(delegator, delegatee, delegatorBalance);
-    }
-    
-    // ============================================================================
-    // VOTING POWER CALCULATIONS
-    // ============================================================================
-    
-    function getVotingPower(address account) public view returns (uint256) {
-        return getVotingPowerAt(account, block.number);
-    }
-    
-    function getVotingPowerAt(address account, uint256 blockNumber) public view returns (uint256) {
-        uint256 tokenBalance = gameToken.balanceOf(account);
-        uint256 nftBalance = petContract.balanceOf(account);
-        
-        // Base voting power from tokens and NFTs
-        uint256 tokenVotes = tokenBalance * tokenVotingPower;
-        uint256 nftVotes = nftBalance * nftVotingPower;
-        
-        // Apply rarity multipliers for NFTs
-        uint256 rarityBonus = _calculateRarityBonus(account);
-        
-        // Apply staking multiplier (simplified - would check actual staking contract)
-        uint256 stakingBonus = _calculateStakingBonus(account);
-        
-        // Calculate total base power
-        uint256 basePower = tokenVotes + nftVotes + rarityBonus + stakingBonus;
-        
-        // Add delegated votes
-        uint256 delegatedPower = delegatedVoteCounts[account];
-        
-        return basePower + delegatedPower;
-    }
-    
-    function _calculateRarityBonus(address account) internal view returns (uint256) {
-        uint256 bonus = 0;
-        uint256 balance = petContract.balanceOf(account);
-        
-        for (uint256 i = 0; i < balance; i++) {
-            uint256 petId = petContract.tokenOfOwnerByIndex(account, i);
-            PetNFT.Pet memory pet = petContract.getPet(petId);
-            
-            if (pet.rarity >= 2) { // Epic or Legendary
-                bonus += nftVotingPower * rarityMultiplier / 100;
-            }
-        }
-        
-        return bonus;
-    }
-    
-    function _calculateStakingBonus(address account) internal view returns (uint256) {
-        // Simplified - would integrate with actual staking contract
-        // For now, assume some staking bonus based on token balance
-        uint256 tokenBalance = gameToken.balanceOf(account);
-        return (tokenBalance * stakingMultiplier / 100) - tokenBalance;
-    }
-    
-    // ============================================================================
-    // PROPOSAL STATE MANAGEMENT
-    // ============================================================================
-    
-    function state(uint256 proposalId) public view returns (ProposalStatus) {
-        require(proposalId < nextProposalId && proposalId > 0, "Invalid proposal");
-        
+    function finalizeProposal(uint256 proposalId) external {
         Proposal storage proposal = proposals[proposalId];
+        require(proposal.id == proposalId, "Proposal does not exist");
+        require(block.number > proposal.endBlock, "Voting still active");
+        require(proposal.status == ProposalStatus.ACTIVE, "Proposal not in active state");
         
-        if (proposal.executed) {
-            return ProposalStatus.EXECUTED;
-        } else if (proposal.status == ProposalStatus.CANCELLED) {
-            return ProposalStatus.CANCELLED;
-        } else if (proposal.status == ProposalStatus.QUEUED) {
-            return ProposalStatus.QUEUED;
-        } else if (block.number <= proposal.startBlock) {
-            return ProposalStatus.PENDING;
-        } else if (block.number <= proposal.endBlock) {
-            return ProposalStatus.ACTIVE;
-        } else if (proposal.forVotes <= proposal.againstVotes || proposal.totalVotes < quorumVotes) {
-            return ProposalStatus.DEFEATED;
+        uint256 totalVotes = proposal.forVotes + proposal.againstVotes + proposal.abstainVotes;
+        
+        // Check quorum
+        bool quorumMet = totalVotes >= proposal.quorumRequired;
+        
+        // Check approval threshold
+        uint256 approvalVotes = proposal.forVotes + proposal.abstainVotes;
+        bool approvalMet = totalVotes > 0 && (approvalVotes * 10000) / totalVotes >= proposal.approvalThreshold;
+        
+        if (quorumMet && approvalMet) {
+            proposal.status = ProposalStatus.SUCCEEDED;
         } else {
-            return ProposalStatus.SUCCEEDED;
+            proposal.status = ProposalStatus.DEFEATED;
         }
     }
     
-    function cancel(uint256 proposalId) external {
-        require(
-            msg.sender == proposals[proposalId].proposer || msg.sender == owner(),
-            "Only proposer or admin can cancel"
-        );
-        require(
-            state(proposalId) == ProposalStatus.PENDING || state(proposalId) == ProposalStatus.ACTIVE,
-            "Cannot cancel executed proposal"
-        );
+    function queueProposal(uint256 proposalId) external {
+        Proposal storage proposal = proposals[proposalId];
+        require(proposal.status == ProposalStatus.SUCCEEDED, "Proposal not succeeded");
+        require(block.number >= proposal.endBlock + proposal.executionDelay, "Execution delay not met");
         
-        proposals[proposalId].status = ProposalStatus.CANCELLED;
-        _removeFromActiveProposals(proposalId);
-        
-        emit ProposalCancelled(proposalId);
+        proposal.status = ProposalStatus.QUEUED;
     }
     
-    function _removeFromActiveProposals(uint256 proposalId) internal {
-        for (uint256 i = 0; i < activeProposals.length; i++) {
-            if (activeProposals[i] == proposalId) {
-                activeProposals[i] = activeProposals[activeProposals.length - 1];
-                activeProposals.pop();
-                break;
-            }
+    function executeProposal(uint256 proposalId) external nonReentrant {
+        Proposal storage proposal = proposals[proposalId];
+        require(proposal.status == ProposalStatus.QUEUED, "Proposal not queued");
+        require(block.timestamp <= proposal.executionDeadline, "Execution window expired");
+        require(!proposal.executed, "Already executed");
+        
+        proposal.executed = true;
+        proposal.status = ProposalStatus.EXECUTED;
+        
+        // Execute treasury allocations if applicable
+        if (proposal.proposalType == ProposalType.TREASURY_SPEND) {
+            _executeTreasuryAllocation(proposalId);
         }
+        
+        emit ProposalExecuted(proposalId, msg.sender);
+    }
+    
+    function _executeTreasuryAllocation(uint256 proposalId) internal {
+        // This is a simplified implementation
+        // In practice, would parse actions array for specific allocations
+        uint256 allocationId = nextAllocationId++;
+        
+        treasuryAllocations[allocationId] = TreasuryAllocation({
+            amount: 0, // Would be parsed from actions
+            recipient: address(0), // Would be parsed from actions
+            purpose: "Treasury allocation", // Would be parsed from actions
+            executed: false,
+            executionBlock: block.number
+        });
+    }
+    
+    function cancelProposal(uint256 proposalId) external {
+        Proposal storage proposal = proposals[proposalId];
+        require(proposal.id == proposalId, "Proposal does not exist");
+        require(msg.sender == proposal.proposer || msg.sender == owner(), "Not authorized to cancel");
+        require(proposal.status == ProposalStatus.PENDING || proposal.status == ProposalStatus.ACTIVE, "Cannot cancel proposal");
+        
+        proposal.status = ProposalStatus.CANCELLED;
+        emit ProposalCancelled(proposalId, msg.sender);
     }
     
     // ============================================================================
@@ -609,102 +503,101 @@ contract PetDAO is Ownable, ReentrancyGuard, Pausable {
         ProposalStatus status,
         string memory title,
         string memory description,
+        uint256 startBlock,
+        uint256 endBlock,
         uint256 forVotes,
         uint256 againstVotes,
         uint256 abstainVotes,
-        uint32 startBlock,
-        uint32 endBlock,
-        uint32 createdAt
+        uint256 totalVotingPower,
+        uint256 quorumRequired
     ) {
         Proposal storage proposal = proposals[proposalId];
         return (
             proposal.id,
             proposal.proposer,
             proposal.proposalType,
-            state(proposalId),
+            proposal.status,
             proposal.title,
             proposal.description,
+            proposal.startBlock,
+            proposal.endBlock,
             proposal.forVotes,
             proposal.againstVotes,
             proposal.abstainVotes,
-            proposal.startBlock,
-            proposal.endBlock,
-            proposal.createdAt
+            proposal.totalVotingPower,
+            proposal.quorumRequired
         );
     }
     
-    function getProposalActions(uint256 proposalId) external view returns (
-        string[] memory targets,
-        bytes[] memory calldatas,
-        uint256[] memory values
+    function getProposalActions(uint256 proposalId) external view returns (string[] memory) {
+        return proposals[proposalId].actions;
+    }
+    
+    function getVote(uint256 proposalId, address voter) external view returns (
+        bool hasVoted,
+        VoteChoice choice,
+        uint256 votingPower,
+        uint256 timestamp,
+        string memory reason
     ) {
-        return (
-            proposals[proposalId].targets,
-            proposals[proposalId].calldatas,
-            proposals[proposalId].values
-        );
+        Vote storage vote = proposals[proposalId].votes[voter];
+        return (vote.hasVoted, vote.choice, vote.votingPower, vote.timestamp, vote.reason);
     }
     
-    function getActiveProposals() external view returns (uint256[] memory) {
-        return activeProposals;
+    function getVoterProfile(address voter) external view returns (VoterProfile memory) {
+        return voterProfiles[voter];
     }
     
-    function getExecutedProposals() external view returns (uint256[] memory) {
-        return executedProposals;
+    function getDelegators(address delegate) external view returns (address[] memory) {
+        return delegators[delegate];
     }
     
-    function getReceipt(uint256 proposalId, address voter) external view returns (Receipt memory) {
-        return proposals[proposalId].receipts[voter];
+    function proposalNeedsQueuing(uint256 proposalId) external view returns (bool) {
+        Proposal storage proposal = proposals[proposalId];
+        return proposal.status == ProposalStatus.SUCCEEDED && 
+               block.number >= proposal.endBlock + proposal.executionDelay;
     }
     
-    function getDelegation(address account) external view returns (Delegation memory) {
-        return delegations[account];
+    function proposalCanExecute(uint256 proposalId) external view returns (bool) {
+        Proposal storage proposal = proposals[proposalId];
+        return proposal.status == ProposalStatus.QUEUED && 
+               block.timestamp <= proposal.executionDeadline && 
+               !proposal.executed;
     }
     
     // ============================================================================
     // ADMIN FUNCTIONS
     // ============================================================================
     
-    function updateGovernanceParameters(
-        uint256 _proposalThreshold,
-        uint256 _quorumVotes,
-        uint256 _votingPeriod,
-        uint256 _votingDelay,
-        uint256 _timelockDelay
-    ) external onlyOwner {
-        proposalThreshold = _proposalThreshold;
-        quorumVotes = _quorumVotes;
-        votingPeriod = _votingPeriod;
-        votingDelay = _votingDelay;
-        timelockDelay = _timelockDelay;
-        
-        emit GovernanceParametersUpdated(_proposalThreshold, _quorumVotes, _votingPeriod);
+    function setProposalThreshold(uint256 newThreshold) external onlyOwner {
+        proposalThreshold = newThreshold;
     }
     
-    function updateVotingPowerMultipliers(
-        uint256 _tokenVotingPower,
-        uint256 _nftVotingPower,
-        uint256 _stakingMultiplier,
-        uint256 _rarityMultiplier
-    ) external onlyOwner {
-        tokenVotingPower = _tokenVotingPower;
-        nftVotingPower = _nftVotingPower;
-        stakingMultiplier = _stakingMultiplier;
-        rarityMultiplier = _rarityMultiplier;
+    function setVotingDelay(uint256 newDelay) external onlyOwner {
+        votingDelay = newDelay;
     }
     
-    function addEmergencyExecutor(address executor) external onlyOwner {
-        emergencyExecutors[executor] = true;
-        emit EmergencyExecutorAdded(executor);
+    function setVotingPeriod(uint256 newPeriod) external onlyOwner {
+        votingPeriod = newPeriod;
     }
     
-    function removeEmergencyExecutor(address executor) external onlyOwner {
-        emergencyExecutors[executor] = false;
+    function setExecutionDelay(uint256 newDelay) external onlyOwner {
+        executionDelay = newDelay;
     }
     
-    function setTreasuryMultisig(address _treasuryMultisig) external onlyOwner {
-        require(_treasuryMultisig != address(0), "Invalid treasury address");
-        treasuryMultisig = _treasuryMultisig;
+    function setQuorumThreshold(ProposalType proposalType, uint256 newThreshold) external onlyOwner {
+        require(newThreshold <= 5000, "Quorum threshold too high"); // Max 50%
+        quorumThresholds[proposalType] = newThreshold;
+    }
+    
+    function setApprovalThreshold(ProposalType proposalType, uint256 newThreshold) external onlyOwner {
+        require(newThreshold >= 5000 && newThreshold <= 9000, "Invalid approval threshold"); // 50-90%
+        approvalThresholds[proposalType] = newThreshold;
+    }
+    
+    function setTreasuryAddress(address newTreasury) external onlyOwner {
+        require(newTreasury != address(0), "Invalid treasury address");
+        treasuryAddress = newTreasury;
     }
     
     function pause() external onlyOwner {
@@ -715,39 +608,8 @@ contract PetDAO is Ownable, ReentrancyGuard, Pausable {
         _unpause();
     }
     
-    // ============================================================================
-    // TREASURY MANAGEMENT
-    // ============================================================================
-    
-    function depositToTreasury() external payable {
-        treasuryBalance += msg.value;
-    }
-    
-    function withdrawFromTreasury(address payable recipient, uint256 amount) external {
-        require(msg.sender == treasuryMultisig, "Only treasury multisig can withdraw");
-        require(amount <= treasuryBalance, "Insufficient treasury balance");
-        
-        treasuryBalance -= amount;
-        recipient.transfer(amount);
-    }
-    
-    function getTreasuryBalance() external view returns (uint256) {
-        return treasuryBalance;
-    }
-    
-    // ============================================================================
-    // EMERGENCY FUNCTIONS
-    // ============================================================================
-    
-    function emergencyPause() external onlyEmergencyExecutor {
-        _pause();
-    }
-    
-    function emergencyExecute(
-        address target,
-        uint256 value,
-        bytes calldata data
-    ) external onlyEmergencyExecutor returns (bool, bytes memory) {
-        return target.call{value: value}(data);
+    function emergencyCancel(uint256 proposalId) external onlyOwner {
+        proposals[proposalId].status = ProposalStatus.CANCELLED;
+        emit ProposalCancelled(proposalId, msg.sender);
     }
 }
